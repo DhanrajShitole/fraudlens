@@ -1,0 +1,35 @@
+# --- Data (never commit raw datasets) ---
+data/
+*.csv
+*.parquet
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+
+# --- ML/MLOps artifacts ---
+mlruns/
+mlflow.db
+*.pkl
+*.joblib
+*.pt
+*.h5
+
+# --- Node / React ---
+node_modules/
+dist/
+build/
+.next/
+
+# --- Docker ---
+*.env.local
+
+# --- OS/IDE ---
+.DS_Store
+.vscode/
+.idea/

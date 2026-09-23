@@ -2,7 +2,7 @@
 
 **A real-time, explainable fraud detection platform with an agentic investigation copilot.**
 
-> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, and baseline modeling complete; agent layer, backend, and deployment in progress.
+> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, baseline modeling, hyperparameter tuning, and SHAP explainability complete; agent layer, backend, and deployment in progress.
 
 ---
 
@@ -55,7 +55,21 @@ MLflow experiment tracking with a SQLite backend (`mlflow.db`); every training r
 |---|---|---|---|
 | Logistic Regression | 0.305 | 0.818 | 0.354 |
 | LightGBM + scale_pos_weight | 0.552 | 0.916 | 0.506 |
-| **LightGBM + SMOTE (best)** | **0.557** | 0.904 | **0.515** |
+| LightGBM + SMOTE (Phase 4 baseline) | 0.557 | 0.904 | 0.515 |
+| **LightGBM + SMOTE, tuned (Phase 5, best)** | **0.598** | 0.924 | **0.541** |
+
+Hyperparameter tuning (RandomizedSearchCV, PR-AUC-scored, 3-fold CV) improved PR-AUC by **+7.3% relative** over the untuned baseline. Full SHAP explainability was run on the tuned model across all 545 candidate features — see `reports/ieee_shap_summary.png` and `reports/ieee_shap_feature_importance.csv`.
+
+**Entity-graph feature validation:** the engineered entity-relationship features (built from shared card/address/email identifiers, adapted from the original device/IP plan due to high missingness — see Phase 3 notes) rank genuinely high by SHAP importance:
+
+| Feature | SHAP Rank | Percentile |
+|---|---|---|
+| `card1_addr1_amt_mean` | 13 / 545 | top 2.4% |
+| `card1_addr1_count` | 17 / 545 | top 3.1% |
+| `card1_addr1_amt_std` | 24 / 545 | top 4.4% |
+| `card1_addr1_email_count` | 39 / 545 | top 7.2% |
+
+All four rank in the top 7% of features — validating the Phase 3 design decision to build entity signal from these fields instead of the sparser device/IP columns.
 
 ### PaySim (1,221.6:1 imbalance)
 
@@ -72,7 +86,7 @@ MLflow experiment tracking with a SQLite backend (`mlflow.db`); every training r
 - [x] Phase 2 — Data collection
 - [x] Phase 3 — Data engineering (576 features, leakage-safe time-based splits)
 - [x] Phase 4 — Baseline ML (LightGBM best on both datasets; honest anomaly-detection comparison documented)
-- [ ] Phase 5 — Advanced ML/DL (SHAP explainability, hyperparameter tuning, entity-graph feature evaluation)
+- [x] Phase 5 — Advanced ML/DL (hyperparameter tuning: +7.3% PR-AUC; SHAP explainability; entity-graph features validated in top 7% of 545 features)
 - [ ] Phase 6 — AI/GenAI integration (agentic investigation copilot)
 - [ ] Phase 7 — Backend
 - [ ] Phase 8 — Frontend

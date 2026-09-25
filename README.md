@@ -2,7 +2,7 @@
 
 **A real-time, explainable fraud detection platform with an agentic investigation copilot.**
 
-> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, baseline modeling, hyperparameter tuning, and SHAP explainability complete; agent layer, backend, and deployment in progress.
+> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, baseline modeling, hyperparameter tuning, SHAP explainability, and the agentic investigation copilot are complete; backend and cloud deployment in progress.
 
 ---
 
@@ -21,7 +21,7 @@ Financial institutions process millions of transactions daily; fraud-detection m
 | Data | Pandas, NumPy, PostgreSQL (planned) | Feature engineering and eventual storage layer |
 | ML | scikit-learn, LightGBM, imbalanced-learn (SMOTE) | Cost-sensitive classification under class imbalance |
 | Experiment Tracking | MLflow (SQLite backend) | Every model run logged with params/metrics for honest comparison |
-| GenAI | LLM API (Claude), pgvector (planned) | Agentic investigation copilot — in progress |
+| GenAI | Llama 3.1 8B (Ollama, local), scikit-learn TF-IDF | Zero-cost, offline agent layer — see Section 8 |
 | Backend | FastAPI (planned) | Real-time scoring + case endpoints |
 | Frontend | React, TypeScript, Tailwind (planned) | Analyst dashboard |
 | Infra | Docker, GitHub Actions (planned) | Containerized deployment, CI |
@@ -80,14 +80,32 @@ All four rank in the top 7% of features — validating the Phase 3 design decisi
 
 **Key finding:** we hypothesized PaySim's extreme imbalance would favor unsupervised anomaly detection over supervised learning. The opposite was true — supervised LightGBM won decisively. We attribute this to PaySim's highly structured fraud pattern (confined to 2 transaction types with a clean account-draining signature), which a supervised model learns efficiently even from few positive examples, while Isolation Forest instead flags generic statistical outliers that are mostly legitimate. This negative result for the anomaly-detection hypothesis is documented rather than hidden — see `phase4_summary.md` for the full writeup, including the caveat that PaySim's synthetic fraud pattern is more learnable than real-world fraud would likely be.
 
-## 8. Roadmap
+## 8. Agentic Investigation Copilot (Phase 6)
+
+Built a narrow, tool-scoped LLM agent (`src/agent.py`) that, given a flagged TransactionID, gathers evidence via three read-only tools and drafts a structured case file — it never decides fraud/not-fraud and never takes an autonomous action.
+
+**Stack choice:** locally-hosted **Llama 3.1 8B via Ollama** — zero cost, fully offline, no data leaves the machine. A deliberate engineering trade-off given project constraints, documented honestly rather than hidden.
+
+**Tools:**
+- `get_entity_history` — lifetime transaction count/value/known-fraud-count for the card+address entity behind a transaction
+- `get_related_entities` — distinct email domains sharing the exact same card+address combination (a fraud-ring proxy)
+- `retrieve_policy_clause` — TF-IDF retrieval over a small synthetic fraud-policy corpus (a lightweight, appropriately-scoped stand-in for full RAG at this corpus size)
+
+**Evaluation — two real issues found and fixed:**
+1. **Geographic hallucination:** the model initially misread the `addr1` field (a coarse internal billing-region code) as a "country" and fabricated a cross-border justification not grounded in any tool output. Fixed with an explicit system-prompt constraint forbidding geographic claims the tools don't support.
+2. **Data-granularity bug:** the original `get_related_entities` tool grouped by `addr1` alone, which is a coarse regional code shared by thousands of unrelated transactions in this dataset — producing meaningless, noisy counts (e.g. "723 other cards"). Fixed by regrouping to `card1`+`addr1` together, matching the granularity of the Phase 5-validated `card1_addr1_count` feature.
+3. **(Caught, then fixed) time-window overreach:** the model asserted a specific "24-hour window" from a policy clause that no tool actually verified (tools report lifetime totals only). Fixed with an explicit instruction not to claim unverified temporal specifics.
+
+After these fixes, the agent produces fully evidence-grounded case files with no invented facts, verified by manual review of its tool-call trace against its final output — see `reports/` for example case files.
+
+## 9. Roadmap
 
 - [x] Phase 1 — Research & problem definition
 - [x] Phase 2 — Data collection
 - [x] Phase 3 — Data engineering (576 features, leakage-safe time-based splits)
 - [x] Phase 4 — Baseline ML (LightGBM best on both datasets; honest anomaly-detection comparison documented)
 - [x] Phase 5 — Advanced ML/DL (hyperparameter tuning: +7.3% PR-AUC; SHAP explainability; entity-graph features validated in top 7% of 545 features)
-- [ ] Phase 6 — AI/GenAI integration (agentic investigation copilot)
+- [x] Phase 6 — AI/GenAI integration (tool-scoped LLM agent, Llama 3.1/Ollama; two hallucination classes found and fixed during evaluation)
 - [ ] Phase 7 — Backend
 - [ ] Phase 8 — Frontend
 - [ ] Phase 9 — MLOps (model registry, drift detection)

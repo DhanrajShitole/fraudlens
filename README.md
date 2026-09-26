@@ -2,7 +2,7 @@
 
 **A real-time, explainable fraud detection platform with an agentic investigation copilot.**
 
-> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, baseline modeling, hyperparameter tuning, SHAP explainability, and the agentic investigation copilot are complete; backend and cloud deployment in progress.
+> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, baseline modeling, hyperparameter tuning, SHAP explainability, the agentic investigation copilot, and a working FastAPI backend are complete; frontend and cloud deployment in progress.
 
 ---
 
@@ -22,7 +22,7 @@ Financial institutions process millions of transactions daily; fraud-detection m
 | ML | scikit-learn, LightGBM, imbalanced-learn (SMOTE) | Cost-sensitive classification under class imbalance |
 | Experiment Tracking | MLflow (SQLite backend) | Every model run logged with params/metrics for honest comparison |
 | GenAI | Llama 3.1 8B (Ollama, local), scikit-learn TF-IDF | Zero-cost, offline agent layer — see Section 8 |
-| Backend | FastAPI (planned) | Real-time scoring + case endpoints |
+| Backend | FastAPI, SQLite | Real-time scoring, agent-triggered investigation, case log — 5 endpoints, working |
 | Frontend | React, TypeScript, Tailwind (planned) | Analyst dashboard |
 | Infra | Docker, GitHub Actions (planned) | Containerized deployment, CI |
 | Cloud | AWS (S3, Fargate, RDS, CloudWatch) (planned) | See full blueprint for service-by-service justification |
@@ -98,7 +98,25 @@ Built a narrow, tool-scoped LLM agent (`src/agent.py`) that, given a flagged Tra
 
 After these fixes, the agent produces fully evidence-grounded case files with no invented facts, verified by manual review of its tool-call trace against its final output — see `reports/` for example case files.
 
-## 9. Roadmap
+## 9. Backend API (Phase 7)
+
+A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, and the agent together into 5 real endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Service status, confirms model is loaded |
+| `POST /score/{transaction_id}` | Real-time risk score + top-5 SHAP reason codes for a transaction |
+| `POST /investigate/{transaction_id}` | Triggers the agent to draft a full case file |
+| `GET /cases` | Lists past investigations (SQLite-backed log) |
+| `GET /cases/{case_id}` | Retrieves one past investigation in full |
+
+**Model persistence:** the Phase 5 tuned model was retrained with its known-best hyperparameters and saved to `models/ieee_lightgbm_tuned.joblib` (`src/persist_model.py`) — it previously only existed in memory during that script's run, which would have made a real API impossible without this step.
+
+**Documented simplification:** since this project has no live transaction stream, `/score` looks up transactions that already exist in the processed validation set by ID, rather than accepting arbitrary raw transaction data in the request body. This is a deliberate, disclosed scope decision appropriate for a project without production traffic — not a hidden shortcut.
+
+**Case persistence:** investigations are logged to a local SQLite database (`cases.db`, gitignored — regenerate by running the API) rather than the originally-planned PostgreSQL, since a single-file database is a reasonable, honest choice at this project's current scale; migrating to Postgres remains a natural next step if this were pushed toward production.
+
+## 10. Roadmap
 
 - [x] Phase 1 — Research & problem definition
 - [x] Phase 2 — Data collection
@@ -106,7 +124,7 @@ After these fixes, the agent produces fully evidence-grounded case files with no
 - [x] Phase 4 — Baseline ML (LightGBM best on both datasets; honest anomaly-detection comparison documented)
 - [x] Phase 5 — Advanced ML/DL (hyperparameter tuning: +7.3% PR-AUC; SHAP explainability; entity-graph features validated in top 7% of 545 features)
 - [x] Phase 6 — AI/GenAI integration (tool-scoped LLM agent, Llama 3.1/Ollama; two hallucination classes found and fixed during evaluation)
-- [ ] Phase 7 — Backend
+- [x] Phase 7 — Backend (FastAPI: scoring, agent-triggered investigation, SQLite case log — 5 endpoints, all tested working)
 - [ ] Phase 8 — Frontend
 - [ ] Phase 9 — MLOps (model registry, drift detection)
 - [ ] Phase 10 — Cloud deployment

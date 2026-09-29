@@ -82,21 +82,45 @@ All four rank in the top 7% of features — validating the Phase 3 design decisi
 
 ## 8. Agentic Investigation Copilot (Phase 6)
 
-Built a narrow, tool-scoped LLM agent (`src/agent.py`) that, given a flagged TransactionID, gathers evidence via three read-only tools and drafts a structured case file — it never decides fraud/not-fraud and never takes an autonomous action.
+Built a narrow, tool-scoped LLM agent (`src/agent.py`) that, given a TransactionID, gathers evidence via three read-only tools and drafts a structured case file — it never decides fraud/not-fraud and never takes an autonomous action.
 
 **Stack choice:** locally-hosted **Llama 3.1 8B via Ollama** — zero cost, fully offline, no data leaves the machine. A deliberate engineering trade-off given project constraints, documented honestly rather than hidden.
 
 **Tools:**
-- `get_entity_history` — lifetime transaction count/value/known-fraud-count for the card+address entity behind a transaction
-- `get_related_entities` — distinct email domains sharing the exact same card+address combination (a fraud-ring proxy)
-- `retrieve_policy_clause` — TF-IDF retrieval over a small synthetic fraud-policy corpus (a lightweight, appropriately-scoped stand-in for full RAG at this corpus size)
+- `get_entity_history` — this card+address entity's transaction history **as of** the transaction under investigation (point-in-time only — see leakage fix below)
+- `get_related_entities` — distinct email domains sharing the exact same card+address combination, both lifetime and in the policy-relevant 30-day window
+- `retrieve_policy_clause` — TF-IDF retrieval over a small synthetic fraud-policy corpus, queried by the system from actual evidence rather than by the model (see redesign below)
 
-**Evaluation — two real issues found and fixed:**
-1. **Geographic hallucination:** the model initially misread the `addr1` field (a coarse internal billing-region code) as a "country" and fabricated a cross-border justification not grounded in any tool output. Fixed with an explicit system-prompt constraint forbidding geographic claims the tools don't support.
-2. **Data-granularity bug:** the original `get_related_entities` tool grouped by `addr1` alone, which is a coarse regional code shared by thousands of unrelated transactions in this dataset — producing meaningless, noisy counts (e.g. "723 other cards"). Fixed by regrouping to `card1`+`addr1` together, matching the granularity of the Phase 5-validated `card1_addr1_count` feature.
-3. **(Caught, then fixed) time-window overreach:** the model asserted a specific "24-hour window" from a policy clause that no tool actually verified (tools report lifetime totals only). Fixed with an explicit instruction not to claim unverified temporal specifics.
+### Evaluation round 1 — three hallucination classes found in early prompt-only testing
 
-After these fixes, the agent produces fully evidence-grounded case files with no invented facts, verified by manual review of its tool-call trace against its final output — see `reports/` for example case files.
+1. **Geographic hallucination:** the model misread `addr1` (a coarse internal billing-region code) as a "country" and fabricated a cross-border justification. Fixed with an explicit constraint against unsupported geographic claims.
+2. **Data-granularity bug:** `get_related_entities` originally grouped by `addr1` alone — a coarse regional code shared by thousands of unrelated transactions — producing meaningless counts (e.g. "723 other cards"). Fixed by grouping on `card1`+`addr1` together, matching the granularity of the Phase 5-validated `card1_addr1_count` feature.
+3. **Time-window overreach:** the model asserted a specific "24-hour window" a policy clause required, which no tool had actually verified. Fixed with an instruction against unverified temporal claims.
+
+### Evaluation round 2 — a deeper problem, and an architectural rewrite
+
+Continued testing surfaced two issues that prompt instructions alone couldn't fix:
+
+- **Label leakage:** the entity-history tool could include the transaction being investigated (and any *later* transactions for that entity) when computing its "known prior fraud" count — silently leaking the answer into its own evidence.
+- **Blind policy retrieval:** the model wrote its policy search query in the same turn as the evidence tools, *before* seeing any evidence. It searched generically, TF-IDF returned a plausible-sounding but wrong match (a "cross-border" policy with zero supporting evidence), and the model then rationalized the mismatch rather than reporting it as a non-match.
+
+Both are evidence-pipeline design flaws, not prompt-wording problems, so `agent.py` was substantially rewritten:
+
+- **Point-in-time evidence:** both tools now filter strictly to `TransactionDT <= this transaction`, and prior-fraud counts use strictly *earlier* transactions only — no leakage of the current or future labels.
+- **Evidence-driven policy search:** the search query is now built by the system from the actual tool results (not written by the model pre-evidence), with a relevance floor below which no policy is cited at all rather than forcing a weak match.
+- **Deterministic decision layer:** `RECOMMENDED ACTION`, `RELATED ENTITY SIGNAL`, and `RELEVANT POLICY` are now computed in code from tool output, not written by the LLM — the model's role is narrowed to orchestrating tool calls and writing two fact-checked narrative lines (`ENTITY SUMMARY`, `TOP RISK FACTORS`). Every number the model writes is validated against the literal tool output before being trusted; unsupported or evaluative language triggers an automatic fallback to code-generated text.
+- **Ollama-crash resilience:** given the recurring local CUDA crash encountered during this project, a full LLM-unavailable path now returns a complete, accurate, tool-derived case file instead of an error — an analyst gets a usable result even when the model itself is down.
+
+### Formal validation (5-case test suite against the real model)
+
+A held-out test — 2 known-fraud cases (one exercising each policy path), 1 known-legitimate case, 1 case with missing identifiers, and 1 repeat run to check non-determinism — found:
+
+- **The recovery path, not the clean path, is the norm:** only 1 of 5 runs completed cleanly on the first attempt; the other 4 required the recovery mechanism after the model skipped one or more tool calls. This validates that the robustness layer wasn't precautionary — for an 8B local model, it's load-bearing.
+- **A fourth hallucination class**, caught by manual review of the "clean" output rather than the validator itself: the model wrote *"mean transaction amount of $144.14 is greater than the overall mean of $144.14"* — a self-referential, vacuous comparison. The number was technically grounded (it appeared in tool output) and used no banned language, so the automated validator correctly let it through; only a human reading the sentence for logical coherence caught it. Documented as a known limitation rather than silently patched, since it didn't meet the bar for a code change given the low severity — the concrete fix (reject comparative phrasing unless two distinct grounded numbers are present) is identified but not yet implemented.
+- On the missing-identifier case, the agent degraded gracefully to an "insufficient data" case file with no fabricated numbers, rather than crashing.
+- The Case 1 → Case 5 repeat run produced different narrative wording but identical policy match and recommended action — confirming non-determinism affects phrasing, not the decision-relevant output.
+
+See `reports/` for example case files and the full validation transcript.
 
 ## 9. Backend API (Phase 7)
 
@@ -123,7 +147,7 @@ A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, a
 - [x] Phase 3 — Data engineering (576 features, leakage-safe time-based splits)
 - [x] Phase 4 — Baseline ML (LightGBM best on both datasets; honest anomaly-detection comparison documented)
 - [x] Phase 5 — Advanced ML/DL (hyperparameter tuning: +7.3% PR-AUC; SHAP explainability; entity-graph features validated in top 7% of 545 features)
-- [x] Phase 6 — AI/GenAI integration (tool-scoped LLM agent, Llama 3.1/Ollama; two hallucination classes found and fixed during evaluation)
+- [x] Phase 6 — AI/GenAI integration (tool-scoped LLM agent, Llama 3.1/Ollama; rewritten for point-in-time evidence and deterministic decision logic after 4 hallucination classes found across two evaluation rounds; formally validated with a 5-case test suite)
 - [x] Phase 7 — Backend (FastAPI: scoring, agent-triggered investigation, SQLite case log — 5 endpoints, all tested working)
 - [ ] Phase 8 — Frontend
 - [ ] Phase 9 — MLOps (model registry, drift detection)

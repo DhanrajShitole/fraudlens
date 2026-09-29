@@ -17,8 +17,8 @@ raw transaction fields in the POST body instead of a lookup ID — this is
 a deliberate simplification appropriate for a final-year project without
 a live transaction stream, documented here rather than hidden.
 
-Run with:
-    C:\\...\\Python313\\python.exe -m uvicorn api.main:app --reload --app-dir src
+Run with (from the FraudLens root):
+    C:\\...\\Python313\\python.exe -m uvicorn api.main:app --reload
 
 Required packages:
     C:\\...\\Python313\\python.exe -m pip install fastapi uvicorn
@@ -36,6 +36,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -59,6 +60,9 @@ def _init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             transaction_id INTEGER NOT NULL,
             risk_score REAL,
+            threshold_used REAL,
+            flagged INTEGER,
+            top_reason_codes TEXT,
             case_file TEXT,
             created_at TEXT NOT NULL
         )
@@ -69,7 +73,6 @@ def _init_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load model, metadata, and validation data once.
     print("Loading model and metadata...")
     _state["model"] = joblib.load(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned.joblib"))
     with open(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned_metadata.json")) as f:
@@ -92,6 +95,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="FraudLens API", version="0.1.0", lifespan=lifespan)
 
+# Allow the dashboard (opened as a local file:// page, or served from any local
+# dev port) to call this API from the browser. Wide open ("*") is appropriate
+# here since this is a local-only dev tool with no real user auth yet — this
+# would need to be locked down to specific origins before any real deployment.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class ScoreResponse(BaseModel):
     transaction_id: int
@@ -104,6 +119,9 @@ class ScoreResponse(BaseModel):
 class InvestigateResponse(BaseModel):
     transaction_id: int
     risk_score: float
+    flagged: bool
+    threshold_used: float
+    top_reason_codes: list[dict]
     case_file: str
     case_id: int
 
@@ -117,8 +135,10 @@ def health():
     }
 
 
-@app.post("/score/{transaction_id}", response_model=ScoreResponse)
-def score_transaction(transaction_id: int):
+def _score_internal(transaction_id: int) -> ScoreResponse:
+    """Core scoring logic, shared by /score and /investigate so both always
+    agree on the risk score, threshold, and reason codes for a transaction —
+    avoids the two endpoints ever disagreeing or one having stale/missing data."""
     feats = _state["metadata"]["feature_columns"]
     threshold = _state["metadata"]["threshold_2pct_fp_budget"]
 
@@ -152,10 +172,17 @@ def score_transaction(transaction_id: int):
     )
 
 
+@app.post("/score/{transaction_id}", response_model=ScoreResponse)
+def score_transaction(transaction_id: int):
+    return _score_internal(transaction_id)
+
+
 @app.post("/investigate/{transaction_id}", response_model=InvestigateResponse)
 def investigate_transaction(transaction_id: int):
-    # Reuse the scoring logic first, so the case file has a risk score to reference.
-    score_result = score_transaction(transaction_id)
+    # Reuse the exact same scoring logic first, so the case file — and the
+    # dashboard's flagged badge — always reflect the real threshold, never a
+    # stale or missing one from a separate earlier call.
+    score_result = _score_internal(transaction_id)
 
     try:
         from agent import investigate as agent_investigate
@@ -163,12 +190,34 @@ def investigate_transaction(transaction_id: int):
         raise HTTPException(status_code=500,
                              detail="Agent module not found — ensure src/agent.py exists and Ollama is running.")
 
-    case_file_text = agent_investigate(transaction_id, verbose=False)
+    try:
+        case_file_text = agent_investigate(transaction_id, verbose=False)
+    except Exception as e:
+        # Most commonly: the local Ollama service crashed or isn't running.
+        # Returning a proper HTTPException (rather than letting the raw
+        # exception propagate) ensures FastAPI still applies CORS headers
+        # to the error response — otherwise the browser reports a generic
+        # "Failed to fetch" instead of showing this actual message.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Agent investigation failed — the local Ollama service may have crashed or isn't running. "
+                   f"Try 'ollama run llama3.1:8b' in a terminal to check it responds, then retry. "
+                   f"Underlying error: {e}"
+        )
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO cases (transaction_id, risk_score, case_file, created_at) VALUES (?, ?, ?, ?)",
-        (transaction_id, score_result.risk_score, case_file_text, datetime.now(timezone.utc).isoformat()),
+        "INSERT INTO cases (transaction_id, risk_score, threshold_used, flagged, top_reason_codes, case_file, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            transaction_id,
+            score_result.risk_score,
+            score_result.threshold_used,
+            int(score_result.flagged),
+            json.dumps(score_result.top_reason_codes),
+            case_file_text,
+            datetime.now(timezone.utc).isoformat(),
+        ),
     )
     case_id = cur.lastrowid
     conn.commit()
@@ -177,6 +226,9 @@ def investigate_transaction(transaction_id: int):
     return InvestigateResponse(
         transaction_id=transaction_id,
         risk_score=score_result.risk_score,
+        flagged=score_result.flagged,
+        threshold_used=score_result.threshold_used,
+        top_reason_codes=score_result.top_reason_codes,
         case_file=case_file_text,
         case_id=case_id,
     )
@@ -202,4 +254,7 @@ def get_case(case_id: int):
     conn.close()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Case {case_id} not found.")
-    return dict(row)
+    result = dict(row)
+    result["flagged"] = bool(result["flagged"])
+    result["top_reason_codes"] = json.loads(result["top_reason_codes"]) if result["top_reason_codes"] else []
+    return result

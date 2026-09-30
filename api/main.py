@@ -77,8 +77,15 @@ async def lifespan(app: FastAPI):
     _state["model"] = joblib.load(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned.joblib"))
     with open(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned_metadata.json")) as f:
         _state["metadata"] = json.load(f)
-    print("Loading validation transactions (stand-in for a live feed)...")
-    _state["val_data"] = pd.read_parquet(os.path.join(DATA_DIR, "ieee_val.parquet"))
+    print("Loading transactions for lookup (train + val combined, matching agent.py's scope)...")
+    train_data = pd.read_parquet(os.path.join(DATA_DIR, "ieee_train.parquet"))
+    val_data = pd.read_parquet(os.path.join(DATA_DIR, "ieee_val.parquet"))
+    _state["val_data"] = pd.concat([train_data, val_data], ignore_index=True)
+    # Kept the attribute name "val_data" so nothing else in this file needs renaming —
+    # it now holds train+val combined, exactly like agent.py's _all_txns. This is a
+    # lookup convenience for a demo without a live feed, not a claim that scoring a
+    # train-seen transaction proves anything about generalization — the model and its
+    # 2%-FP threshold were still selected using val-set metrics only (see README).
 
     try:
         import shap

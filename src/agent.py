@@ -21,13 +21,25 @@ Required packages (install with the full Python 3.13 path):
 Prerequisite: Ollama running locally with the model pulled:
     ollama pull llama3.1:8b
 
+Architecture note (latency): earlier versions let the model decide, across
+2-3 tool-calling rounds, which of the three tools to call and when. The
+validation suite showed the model needed all three tools in every tested
+case, and only 2 sentences of its output (ENTITY SUMMARY, TOP RISK FACTORS)
+are actually used — everything else is deterministic. So the evidence tools
+now always run up front (no model decision needed), and the model is asked
+for those two sentences in a SINGLE completion call given the evidence
+directly, with at most one retry if that response fails validation. This
+cuts the common case from 2-3 model calls to 1, without changing any of the
+validated deterministic logic below.
+
 Known limitations, found during evaluation and mitigated below:
 
 1. An 8B local model does not always use the structured tool-calling
    mechanism reliably across multiple rounds — it sometimes writes a tool
    call out as plain JSON text instead of a real structured tool_call.
-   investigate() detects this (missing required case-file sections) and
-   does one corrective follow-up turn before giving up.
+   The single-call redesign sidesteps this by not asking the model to
+   call tools at all; validation + one retry still guards the two lines
+   it does write.
 
 2. Policy retrieval used to take a free-text query written by the model in
    the SAME round as the evidence tools, i.e. before it had seen any
@@ -307,134 +319,11 @@ def _policy_from_evidence(tool_results: dict) -> dict:
     return primary
 
 
-_TOOLS_SCHEMA = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_entity_history",
-            "description": "Get the transaction history for the entity (card+address) behind a given TransactionID.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "transaction_id": {"type": "integer", "description": "The TransactionID to investigate."}
-                },
-                "required": ["transaction_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_related_entities",
-            "description": "Get shared-identifier signal (distinct emails at the same card+address) for a given TransactionID — a proxy for coordinated fraud rings.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "transaction_id": {"type": "integer", "description": "The TransactionID to investigate."}
-                },
-                "required": ["transaction_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "retrieve_policy_clause",
-            "description": "Look up the fraud policy clause triggered by the evidence returned by "
-                           "get_entity_history and get_related_entities. Call this AFTER those two "
-                           "tools. The search is built by the system from that evidence.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Optional and ignored — the system builds the search from the evidence."}
-                },
-                "required": [],
-            },
-        },
-    },
-]
-
 _TOOL_FUNCTIONS = {
     "get_entity_history": get_entity_history,
     "get_related_entities": get_related_entities,
     "retrieve_policy_clause": retrieve_policy_clause,
 }
-
-_SYSTEM_PROMPT = textwrap.dedent("""
-    You are a fraud investigation assistant. You are given a TransactionID
-    that an analyst has submitted for investigation. You are NOT told what
-    any model scored it, so never say it was "flagged", "high-risk" or
-    "low-risk" by a model. Your job is to gather evidence using the tools available, then produce
-    a structured case file for a human analyst to review.
-
-    You do NOT decide whether the transaction is fraud. You do NOT block or
-    approve anything. You only assemble evidence and summarize it clearly.
-
-    Use the tools to gather: (1) the entity's transaction history, (2) any
-    related-entity / fraud-ring signal, and then (3) the policy clause those
-    findings trigger. Call retrieve_policy_clause only AFTER the other two
-    tools have returned; the system searches for the clause using their
-    results. Then write a final case file with this exact structure:
-
-    ENTITY SUMMARY: <one or two sentences describing the card+address entity from the
-    history tool: its transaction count and total amount>
-    TOP RISK FACTORS: <bulleted list of literal facts from the tool output, no invented facts>
-    RELATED ENTITY SIGNAL: write exactly the word PENDING
-    RELEVANT POLICY: write exactly the word PENDING
-    RECOMMENDED ACTION: write exactly the word PENDING
-
-    The system fills in the three PENDING sections itself from the tool
-    results, so do not write them, and do not recommend anything.
-
-    Only state facts you actually retrieved from the tools. If a tool
-    returns missing/unknown data, say so plainly rather than guessing.
-
-    IMPORTANT: addr1 is a coarse internal billing region code in this
-    dataset — it is NOT a country, a street address, or any kind of
-    geographic identifier you can name. Never describe it as a "country,"
-    never claim "cross-border" activity, and never say a billing address
-    "differs" from anything — none of that information exists in the tool
-    outputs. If you are tempted to invent a geographic explanation, stop
-    and state only the literal numeric facts instead.
-
-    Transaction counts and amounts are lifetime totals for the entity up to
-    this transaction, except transactions_last_24_hours, which covers the
-    24 hours up to it. Never attach a time window to a number unless the
-    tool field name states that window. Write facts in your own words.
-
-    Do NOT describe any number as "high," "low," "large," "small,"
-    "frequent," or "unusual." You have no baseline for what is normal for
-    this kind of entity, so such words are unsupported claims. State the
-    literal numbers only (e.g. "9 transactions totaling $947.42") and let
-    the analyst judge what they mean. The only exception is a comparison
-    a tool explicitly provides. This applies to EVERY section, including
-    RECOMMENDED ACTION and its justification.
-
-    Never write tool or field names (such as known_fraud_count_for_entity)
-    in the case file; say "prior confirmed fraud cases" instead. Never call
-    a number "a concern" or say something "warrants investigation". Use only
-    numbers that appear in the tool results; do not compute, compare or
-    estimate new ones.
-
-    CRITICAL: if you need to call a tool, you MUST use the actual
-    tool-calling mechanism provided to you. NEVER write a tool call out as
-    JSON text inside your response content — that is not a real tool call
-    and will not execute. If you are not calling a tool, your entire
-    response must be the complete, final case file in the exact format
-    above, with all five sections present. Do not submit a partial answer.
-""").strip()
-
-_COMPLETION_RETRY_PROMPT = textwrap.dedent("""
-    Your previous response was incomplete or malformed — it did not contain
-    all five required sections (ENTITY SUMMARY, TOP RISK FACTORS, RELATED
-    ENTITY SIGNAL, RELEVANT POLICY, RECOMMENDED ACTION), or it contained
-    raw tool-call text instead of a real tool call.
-
-    Do NOT call any more tools. Using ONLY the tool results already
-    gathered above in this conversation, write the COMPLETE final case
-    file now, with all five sections present, in the exact format
-    specified in your instructions.
-""").strip()
 
 _ADJ = r"(?:high|large|low|small|significant|unusual|frequent|excessive)"
 _NOUN = r"(?:number|count|volume|amount|level|frequency|quantity)"
@@ -554,6 +443,8 @@ def _model_text_clean(text: str, tool_results: dict) -> bool:
     """True only if a model-written section makes no claim the tool results
     don't support: no unsupported numbers, no time window attached to a count
     that isn't that window's count, no evaluative/geographic words, no field names."""
+    if not text:
+        return False
     if _BANNED_TEXT_RE.search(text) or _SNAKE_RE.search(text):
         return False
     if not _numbers_in(text) <= _grounded_numbers(tool_results):
@@ -569,25 +460,6 @@ def _model_text_clean(text: str, tool_results: dict) -> bool:
     return True
 
 
-def _assemble_case_file(text: str, tool_results: dict) -> str:
-    """Keep the model's ENTITY SUMMARY and TOP RISK FACTORS only if they pass
-    validation (otherwise use tool-derived text — no extra model call); write
-    the three evidence-derived sections from the tool results."""
-    summary = _model_section(text, "ENTITY SUMMARY:")
-    if not summary or summary.upper() == "PENDING" or not _model_text_clean(summary, tool_results):
-        summary = _entity_summary(tool_results)
-    risks = _model_section(text, "TOP RISK FACTORS:")
-    if not risks or risks.upper() == "PENDING" or not _model_text_clean(risks, tool_results):
-        risks = _fallback_risk_bullets(tool_results)
-    return "\n".join([
-        f"ENTITY SUMMARY: {summary}",
-        f"TOP RISK FACTORS:\n{risks}",
-        f"RELATED ENTITY SIGNAL: {_related_entity_signal(tool_results)}",
-        f"RELEVANT POLICY: {_policy_section(tool_results)}",
-        f"RECOMMENDED ACTION: {_recommended_action(tool_results)}",
-    ])
-
-
 def _fallback_risk_bullets(tool_results: dict) -> str:
     h = tool_results.get("get_entity_history", {})
     return "\n".join([
@@ -598,66 +470,17 @@ def _fallback_risk_bullets(tool_results: dict) -> str:
     ])
 
 
-def _finalize(text: str, tool_results: dict) -> str:
-    """Post-process every model-written case file before it reaches an analyst."""
-    return _assemble_case_file(_scrub_magnitude_language(text), tool_results)
-
-
-def _has_all_required_sections(text: str) -> bool:
-    return all(section in text for section in REQUIRED_SECTIONS)
-
-
-_EVIDENCE_TOOLS = ["get_entity_history", "get_related_entities"]
-_REQUIRED_TOOLS = _EVIDENCE_TOOLS + ["retrieve_policy_clause"]
-
-
-def _tool_ok(tool_results: dict, name: str) -> bool:
-    return name in tool_results and "error" not in tool_results[name]
-
-
-def _run_tool(fn_name: str, fn_args: dict) -> dict:
-    """Execute one of the three permitted read-only tools, never raising."""
-    if fn_name not in _TOOL_FUNCTIONS:
-        return {"error": f"Unknown tool '{fn_name}' — not permitted."}
-    try:
-        return _TOOL_FUNCTIONS[fn_name](**fn_args)
-    except Exception as e:
-        return {"error": f"Tool execution failed: {e}"}
-
-
-def _ensure_evidence(messages: list, tool_results: dict, transaction_id: int, verbose: bool) -> None:
-    """Run any evidence tool the model has not (successfully) run yet. The
-    policy lookup depends on these results, so they must exist first."""
-    for tool_name in _EVIDENCE_TOOLS:
-        if _tool_ok(tool_results, tool_name):
-            continue
-        if verbose:
-            print(f"  [!] Evidence tool '{tool_name}' has not run yet — running it directly.")
-        result = _run_tool(tool_name, {"transaction_id": transaction_id})
-        tool_results[tool_name] = result
-        messages.append({
-            "role": "user",
-            "content": f"Additional evidence gathered automatically by the system. "
-                       f"Tool {tool_name} returned: {json.dumps(result)}",
-        })
-
-
-def _fill_missing_evidence(messages: list, tool_results: dict, transaction_id: int, verbose: bool) -> None:
-    """If the model skipped (or only pretended to call) any required tool,
-    run it ourselves and add the result to the conversation, so the final
-    case file is always built from complete evidence rather than gaps the
-    model might paper over."""
-    _ensure_evidence(messages, tool_results, transaction_id, verbose)
-    if not _tool_ok(tool_results, "retrieve_policy_clause"):
-        if verbose:
-            print("  [!] Required tool 'retrieve_policy_clause' was not properly executed — running it from the evidence.")
-        result = _policy_from_evidence(tool_results)
-        tool_results["retrieve_policy_clause"] = result
-        messages.append({
-            "role": "user",
-            "content": f"Additional evidence gathered automatically by the system. "
-                       f"Tool retrieve_policy_clause returned: {json.dumps(result)}",
-        })
+def _assemble_case_file(summary: str, risks: str, tool_results: dict) -> str:
+    """Build the final case file from: the model's two narrative sections
+    (already validated by the caller, with fallbacks already applied) plus
+    the three always-deterministic sections."""
+    return "\n".join([
+        f"ENTITY SUMMARY: {summary}",
+        f"TOP RISK FACTORS:\n{risks}",
+        f"RELATED ENTITY SIGNAL: {_related_entity_signal(tool_results)}",
+        f"RELEVANT POLICY: {_policy_section(tool_results)}",
+        f"RECOMMENDED ACTION: {_recommended_action(tool_results)}",
+    ])
 
 
 def _fallback_case_file(tool_results: dict,
@@ -681,92 +504,145 @@ class _LLMError(Exception):
     """Raised when the Ollama call itself fails (e.g. the CUDA crash)."""
 
 
-def investigate(transaction_id: int, max_tool_rounds: int = 5, verbose: bool = True) -> str:
+_SYSTEM_PROMPT = textwrap.dedent("""
+    You are a fraud investigation assistant. You will be given the complete
+    evidence already gathered by the system for one TransactionID — you do
+    NOT call any tools, and you are NOT told what any model scored this
+    transaction, so never say it was "flagged", "high-risk" or "low-risk".
+
+    Using ONLY the evidence provided, respond with EXACTLY two lines, in
+    this exact format and nothing else — no preamble, no other sections,
+    no markdown:
+
+    ENTITY SUMMARY: <one or two sentences describing the card+address entity's
+    transaction count and total amount, from the evidence>
+    TOP RISK FACTORS:
+    <bulleted list of literal facts from the evidence, one per line, starting with "• ">
+
+    Only state facts that literally appear in the evidence below. Never
+    invent a comparison, a benchmark, or an "overall"/"typical"/"average"
+    reference point — if you want to say a number is notable, you have
+    no baseline to judge that against, so simply state the number and
+    stop there.
+
+    addr1 is a coarse internal billing region code — NOT a country, a
+    street address, or any geographic identifier. Never call it a
+    "country" and never claim "cross-border" activity.
+
+    Counts are lifetime totals for the entity up to this transaction,
+    except transactions_last_24_hours (the 24 hours up to it) and
+    distinct_email_domains_last_30_days (the 30 days up to it). Never
+    attach a time window to a number unless the evidence field name
+    states that window.
+
+    Do NOT describe any number as "high," "low," "large," "small,"
+    "frequent," "unusual," "concerning," or "suspicious" — you have no
+    baseline for what is normal for this kind of entity. State literal
+    numbers only and let the analyst judge them.
+
+    Never write a raw field name (such as known_fraud_count_for_entity)
+    — say "prior confirmed fraud cases" instead.
+""").strip()
+
+_RETRY_NOTE = ("\n\nYour previous response did not follow the required format or made an "
+               "unsupported claim. Follow the instructions exactly this time: two lines only, "
+               "literal numbers only, no invented comparisons.")
+
+
+def _build_evidence_prompt(tool_results: dict) -> str:
+    return ("Evidence gathered for this investigation:\n\n"
+            f"get_entity_history: {json.dumps(tool_results.get('get_entity_history', {}))}\n\n"
+            f"get_related_entities: {json.dumps(tool_results.get('get_related_entities', {}))}\n\n"
+            "Write the two lines now.")
+
+
+def _generate_narrative(tool_results: dict, verbose: bool, stats: dict, messages_log: list) -> tuple:
+    """One completion call (plus at most one retry) asking ONLY for the two
+    model-owned lines, given evidence that was already gathered
+    deterministically. Returns (summary, risks, model_output_used: bool)."""
+    user_prompt = _build_evidence_prompt(tool_results)
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": f"Investigate TransactionID {transaction_id} and produce the case file."},
+        {"role": "user", "content": user_prompt},
     ]
-    tool_results: dict = {}   # tool name -> last result actually executed
-    stats = {"calls": 0, "secs": 0.0}
-    t_start = time.perf_counter()
 
-    def _chat(**kwargs):
+    for attempt in range(2):  # first try + one retry, never more
         t = time.perf_counter()
         try:
-            return ollama.chat(model=MODEL_NAME, messages=messages, **kwargs)
-        except Exception as e:                      # Ollama down, CUDA crash, timeout...
+            response = ollama.chat(model=MODEL_NAME, messages=messages)
+        except Exception as e:
             raise _LLMError(f"{type(e).__name__}: {str(e)[:200]}") from e
         finally:
             stats["secs"] += time.perf_counter() - t
             stats["calls"] += 1
+
+        text = (response["message"].get("content") or "").strip()
+        if verbose:
+            print(f"  [model call {attempt+1}] {len(text)} chars")
+
+        summary = _model_section(text, "ENTITY SUMMARY:") or _model_section("ENTITY SUMMARY: " + text if "ENTITY SUMMARY:" not in text else text, "ENTITY SUMMARY:")
+        # Simpler and more robust for a 2-section-only response than the old
+        # multi-section parser: split on the TOP RISK FACTORS: label directly.
+        if "ENTITY SUMMARY:" in text and "TOP RISK FACTORS:" in text:
+            summary = text.split("ENTITY SUMMARY:", 1)[1].split("TOP RISK FACTORS:", 1)[0].strip()
+            risks = text.split("TOP RISK FACTORS:", 1)[1].strip()
+        else:
+            summary, risks = "", ""
+
+        if _model_text_clean(summary, tool_results) and _model_text_clean(risks, tool_results):
+            return summary, risks, True
+
+        if verbose:
+            print(f"  [!] Attempt {attempt+1} failed validation — "
+                  f"{'retrying' if attempt == 0 else 'giving up, using tool-derived text'}.")
+        messages.append({"role": "assistant", "content": text})
+        messages.append({"role": "user", "content": _RETRY_NOTE})
+
+    return _entity_summary(tool_results), _fallback_risk_bullets(tool_results), False
+
+
+def investigate(transaction_id: int, verbose: bool = True) -> str:
+    stats = {"calls": 0, "secs": 0.0}
+    t_start = time.perf_counter()
+    messages_log = []
+
+    # Evidence is always needed and is never a model decision, so gather it
+    # deterministically up front — this is what cut the common case from
+    # 2-3 model calls down to 1 (see module docstring).
+    tool_results = {
+        "get_entity_history": get_entity_history(transaction_id),
+        "get_related_entities": get_related_entities(transaction_id),
+    }
+    if verbose:
+        print(f"  [evidence] get_entity_history, get_related_entities gathered deterministically")
+    tool_results["retrieve_policy_clause"] = _policy_from_evidence(tool_results)
+    if verbose:
+        print(f"  [evidence] policy search -> {tool_results['retrieve_policy_clause'].get('policy_id')}")
 
     def _report(path: str) -> None:
         total = time.perf_counter() - t_start
         print(f"[agent] TransactionID {transaction_id}: {stats['calls']} model call(s), "
               f"{stats['secs']:.1f}s in model of {total:.1f}s total, path={path}")
 
+    # If the entity itself couldn't be resolved (missing card1/addr1, or the
+    # transaction wasn't found), there's nothing for the model to write about —
+    # skip straight to the deterministic case file, no model call at all.
+    if "total_transactions_by_entity" not in tool_results["get_entity_history"]:
+        _report("no_entity_data")
+        return _fallback_case_file(tool_results, reason="entity history unavailable for this transaction")
+
     try:
-        final_text = None
-        for round_num in range(max_tool_rounds):
-            msg = _chat(tools=_TOOLS_SCHEMA)["message"]
-            messages.append(msg)
-
-            tool_calls = msg.get("tool_calls")
-            if not tool_calls:
-                final_text = (msg.get("content") or "").strip()
-                break
-
-            # Policy lookup runs LAST within a round, after any evidence tools.
-            ordered = sorted(tool_calls, key=lambda c: c["function"]["name"] == "retrieve_policy_clause")
-            for call in ordered:
-                fn_name = call["function"]["name"]
-                fn_args = call["function"]["arguments"]
-                if verbose:
-                    print(f"  [round {round_num+1}] Agent calls {fn_name}({fn_args})")
-
-                if fn_name == "retrieve_policy_clause":
-                    # Never trust a query written before seeing evidence.
-                    _ensure_evidence(messages, tool_results, transaction_id, verbose)
-                    result = _policy_from_evidence(tool_results)
-                    if verbose:
-                        print(f"      policy search built from evidence -> {result.get('policy_id')}")
-                elif fn_name in _EVIDENCE_TOOLS:
-                    # The model does not choose which transaction is investigated.
-                    result = _run_tool(fn_name, {"transaction_id": transaction_id})
-                else:
-                    result = _run_tool(fn_name, fn_args)
-
-                tool_results[fn_name] = result
-                messages.append({"role": "tool", "content": json.dumps(result)})
-
-        # Happy path: complete and all three tools genuinely executed.
-        all_tools_ran = all(_tool_ok(tool_results, t) for t in _REQUIRED_TOOLS)
-        if final_text and _has_all_required_sections(final_text) and all_tools_ran:
-            _report("ok")
-            return _finalize(final_text, tool_results)
-
-        # Recovery: fix the evidence first, then ask for a final answer with
-        # tool-calling DISABLED so the model can't emit another fake tool call.
-        if verbose:
-            print("  [!] Response was incomplete or evidence was missing — recovering...")
-        _fill_missing_evidence(messages, tool_results, transaction_id, verbose)
-        messages.append({"role": "user", "content": _COMPLETION_RETRY_PROMPT})
-        retry_text = (_chat()["message"].get("content") or "").strip()
-
-        if _has_all_required_sections(retry_text):
-            _report("recovered")
-            return _finalize(retry_text, tool_results)
-
-        if verbose:
-            print("  [!] Retry also failed validation — using tool-output fallback case file.")
-        _report("fallback")
-        return _fallback_case_file(tool_results)
+        summary, risks, used_model = _generate_narrative(tool_results, verbose, stats, messages_log)
+        case_file = _assemble_case_file(_scrub_magnitude_language(summary) if used_model else summary,
+                                        _scrub_magnitude_language(risks) if used_model else risks,
+                                        tool_results)
+        _report("ok_model_narrative" if used_model else "ok_fallback_narrative")
+        return case_file
 
     except _LLMError as e:
         # The evidence tools are deterministic, so the analyst still gets a
         # complete, accurate case file even when the language model is down.
         print(f"[agent] language model call failed ({e}) — building the case file from tool outputs only.")
-        _fill_missing_evidence(messages, tool_results, transaction_id, verbose)
         _report("llm_unavailable")
         return _fallback_case_file(
             tool_results, reason="the language model was unavailable, so no model-written text is included")

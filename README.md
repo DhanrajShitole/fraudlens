@@ -122,6 +122,12 @@ A held-out test — 2 known-fraud cases (one exercising each policy path), 1 kno
 
 See `reports/` for example case files and the full validation transcript.
 
+### Performance rearchitecture — from 2-3 model calls to 1
+
+Once correctness was validated, real usage surfaced a usability problem: investigations were slow, especially on this project's local hardware (an intermittent GPU driver issue on the dev machine forced CPU-mode Ollama for stretches of development). Profiling against the validation report's own numbers showed why — the original design let the model *decide*, across up to 3 tool-calling rounds, whether and when to call each tool, and the validation suite had already shown the model needed all three tools in every real test case anyway. The model's actual contribution had also been narrowed, by the earlier fixes, to just two fact-checked sentences (`ENTITY SUMMARY`, `TOP RISK FACTORS`) — multi-round tool orchestration was overhead for a decision the model was never really making.
+
+**Fix:** the two evidence tools and the policy match now always run deterministically up front (no model decision involved), and the model is asked for its two sentences in a **single** completion call given that evidence directly, with at most one retry if the response fails validation. This cut the common case from 2-3 model calls to 1 — validated with 5 synthetic test scenarios (happy path, validation-failure-then-retry, double-failure-to-fallback, missing-entity-data, and a simulated Ollama crash) covering every code path before being tested against the real model, where it was confirmed both faster and no regression in output quality.
+
 ## 9. Backend API (Phase 7)
 
 A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, and the agent together into 5 real endpoints:

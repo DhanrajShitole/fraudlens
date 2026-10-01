@@ -23,7 +23,7 @@ Financial institutions process millions of transactions daily; fraud-detection m
 | Experiment Tracking | MLflow (SQLite backend) | Every model run logged with params/metrics for honest comparison |
 | GenAI | Llama 3.1 8B (Ollama, local), scikit-learn TF-IDF | Zero-cost, offline agent layer — see Section 8 |
 | Backend | FastAPI, SQLite | Real-time scoring, agent-triggered investigation, case log — 5 endpoints, working |
-| Frontend | React, TypeScript, Tailwind (planned) | Analyst dashboard |
+| Frontend | React (CDN, no build step) | Analyst dashboard — single HTML file, see Section 10 |
 | Infra | Docker, GitHub Actions (planned) | Containerized deployment, CI |
 | Cloud | AWS (S3, Fargate, RDS, CloudWatch) (planned) | See full blueprint for service-by-service justification |
 
@@ -142,11 +142,23 @@ A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, a
 
 **Model persistence:** the Phase 5 tuned model was retrained with its known-best hyperparameters and saved to `models/ieee_lightgbm_tuned.joblib` (`src/persist_model.py`) — it previously only existed in memory during that script's run, which would have made a real API impossible without this step.
 
-**Documented simplification:** since this project has no live transaction stream, `/score` looks up transactions that already exist in the processed validation set by ID, rather than accepting arbitrary raw transaction data in the request body. This is a deliberate, disclosed scope decision appropriate for a project without production traffic — not a hidden shortcut.
+**Documented simplification:** since this project has no live transaction stream, `/score` and `/investigate` look up transactions that already exist in the processed dataset by ID (train+val combined, matching the scope `agent.py`'s tools already searched — an early version only searched val, which caused real lookup failures for train-set IDs used during agent testing), rather than accepting arbitrary raw transaction data in the request body. One honest caveat: scoring a **train-set** transaction will look unrealistically confident, since the model saw that row's label during training — the Phase 4/5 evaluation metrics (PR-AUC, recall@budget) remain valid regardless, as those were computed on held-out val/test data only, never train. For a demo that fairly represents real model performance, deliberately pick a val-set ID.
 
 **Case persistence:** investigations are logged to a local SQLite database (`cases.db`, gitignored — regenerate by running the API) rather than the originally-planned PostgreSQL, since a single-file database is a reasonable, honest choice at this project's current scale; migrating to Postgres remains a natural next step if this were pushed toward production.
 
-## 10. Roadmap
+## 10. Frontend Dashboard (Phase 8)
+
+A single self-contained HTML file (`frontend/dashboard.html`) — React via CDN, no npm install or build step, deliberately avoiding another layer of environment setup after the repeated Python-environment friction earlier in this project. Designed as an analyst investigation console (dark, data-dense, monospace for IDs/scores) rather than a generic SaaS dashboard.
+
+**Functionality:** enter a TransactionID → **Get Score** (risk %, flagged/clear badge, SHAP reason-code bars) or **Investigate** (triggers the agent, renders the full case file with section labels highlighted). A sidebar lists recent investigations pulled from `/cases`, clickable to reopen.
+
+**Two real bugs found and fixed during integration testing:**
+1. **CORS:** FastAPI doesn't send CORS headers by default, so opening the dashboard as a local `file://` page silently blocked the browser from reading the API's (successful) responses — the server logs showed `200 OK` while the dashboard showed "can't reach the API." Fixed with explicit `CORSMiddleware`.
+2. **Stale/missing threshold on direct Investigate:** clicking Investigate without first clicking Get Score left the dashboard's "flagged" comparison defaulting to a threshold of 0, so every transaction showed as flagged regardless of actual risk. Fixed by having `/investigate` return the same threshold, flagged status, and reason codes as `/score` directly, so the dashboard never depends on a separate, possibly-stale earlier call — and by storing these fields with each logged case, so reopening history shows accurate data too.
+
+**Verified end-to-end:** all 5 cases from the agent's formal validation suite (Section 8) were re-run through the actual dashboard UI, not just the backend script, confirming the full stack — model, SHAP, agent, API, and UI — agree with each other.
+
+## 11. Roadmap
 
 - [x] Phase 1 — Research & problem definition
 - [x] Phase 2 — Data collection
@@ -155,7 +167,7 @@ A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, a
 - [x] Phase 5 — Advanced ML/DL (hyperparameter tuning: +7.3% PR-AUC; SHAP explainability; entity-graph features validated in top 7% of 545 features)
 - [x] Phase 6 — AI/GenAI integration (tool-scoped LLM agent, Llama 3.1/Ollama; rewritten for point-in-time evidence and deterministic decision logic after 4 hallucination classes found across two evaluation rounds; formally validated with a 5-case test suite)
 - [x] Phase 7 — Backend (FastAPI: scoring, agent-triggered investigation, SQLite case log — 5 endpoints, all tested working)
-- [ ] Phase 8 — Frontend
+- [x] Phase 8 — Frontend (single-file React dashboard, no build step; full-stack verified against all 5 validation cases: score, SHAP reason codes, agent case files, investigation history)
 - [ ] Phase 9 — MLOps (model registry, drift detection)
 - [ ] Phase 10 — Cloud deployment
 - [ ] Phase 11 — Testing & evaluation

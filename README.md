@@ -45,7 +45,7 @@ Baseline models trained and honestly compared across both datasets (see `src/tra
 
 ## 6. MLOps
 
-MLflow experiment tracking with a SQLite backend (`mlflow.db`); every training run logged with hyperparameters and metrics. Model registry, drift monitoring (Evidently AI), and CI/CD deployment are planned for later phases.
+MLflow experiment tracking with a SQLite backend (`mlflow.db`); every training run logged with hyperparameters and metrics. Model registry and drift monitoring are complete (Phase 9 — see Section 11); CI/CD deployment is planned for a later phase.
 
 ## 7. Results
 
@@ -158,7 +158,25 @@ A single self-contained HTML file (`frontend/dashboard.html`) — React via CDN,
 
 **Verified end-to-end:** all 5 cases from the agent's formal validation suite (Section 8) were re-run through the actual dashboard UI, not just the backend script, confirming the full stack — model, SHAP, agent, API, and UI — agree with each other.
 
-## 11. Roadmap
+## 11. MLOps: Model Registry & Drift Detection (Phase 9)
+
+### Model Registry
+
+The tuned IEEE-CIS model is registered in MLflow's Model Registry as `fraudlens-ieee-lightgbm` (`src/register_model.py`), with a `production` alias pointing to the currently-serving version — a real "which model is live right now" pointer, not just a pile of unordered experiment runs.
+
+**One correction made during implementation:** the original plan (and this project's own earlier instructions) referenced MLflow's Production/Staging "stages" API. Testing against the project's actual installed MLflow version (3.16.1) showed `transition_model_version_stage` still works but is deprecated, in favor of `set_registered_model_alias`. Verified directly (register → promote → fetch-by-alias) before committing, and built on the current, non-deprecated API instead of one already scheduled for removal.
+
+### Drift Detection
+
+Implemented directly with pandas/numpy (Population Stability Index, the industry-standard metric), deliberately **not** using a drift-detection library (e.g. Evidently AI) as originally planned — given this project's repeated environment/dependency friction in earlier phases (pyarrow, scikit-learn/imbalanced-learn version mismatches, Ollama/CUDA issues), a ~40-line PSI implementation using packages already installed is both lower-risk and more demonstrably understood than an added dependency. Validated against known synthetic cases (identical distributions, a deliberate large shift, a near-constant feature, NaN handling) before running on real data.
+
+**A useful property of the Phase 3 design, reused here:** since the train/val split was time-based (train = earliest 70%, val = the following 15%), comparing their feature distributions is a genuine temporal drift check — it answers "did real transaction patterns shift between the training period and the period right after it," not a synthetic comparison.
+
+**Results:** 535 of 545 features stable (PSI < 0.1), 2 moderate, 8 flagged "significant" (PSI > 0.25) — but one of those 8 needed a second look before being reported as a real finding. `TransactionDT` showed the highest PSI (8.28) by a wide margin, but this is a **tautological artifact, not real drift**: `TransactionDT` is literally the time variable itself, and train/val were split chronologically on that exact variable — of course their distributions differ completely. Reporting this as "significant drift" without that caveat would have been a real analytical mistake. Excluding it, the honest finding is **7 of 545 features (1.3%) show genuine drift**, concentrated in identity/device-fingerprint fields (`id_13`, `id_20`, `id_02` — plausibly explained by collection infrastructure changing over time) and a handful of anonymized V-features (`V151`, `V160`, `V144`, `V143`, `V166`, `V164`) — exactly the kind of signal a real drift monitor exists to catch and flag for human review, not a cause for alarm given how small a fraction of features are affected.
+
+See `reports/drift_report_train_vs_val.csv` and `reports/drift_report_top20.png` for the full results.
+
+## 12. Roadmap
 
 - [x] Phase 1 — Research & problem definition
 - [x] Phase 2 — Data collection
@@ -168,7 +186,7 @@ A single self-contained HTML file (`frontend/dashboard.html`) — React via CDN,
 - [x] Phase 6 — AI/GenAI integration (tool-scoped LLM agent, Llama 3.1/Ollama; rewritten for point-in-time evidence and deterministic decision logic after 4 hallucination classes found across two evaluation rounds; formally validated with a 5-case test suite)
 - [x] Phase 7 — Backend (FastAPI: scoring, agent-triggered investigation, SQLite case log — 5 endpoints, all tested working)
 - [x] Phase 8 — Frontend (single-file React dashboard, no build step; full-stack verified against all 5 validation cases: score, SHAP reason codes, agent case files, investigation history)
-- [ ] Phase 9 — MLOps (model registry, drift detection)
+- [x] Phase 9 — MLOps (MLflow model registry with alias-based promotion; PSI-based drift detection — 7/545 features genuinely drifted, with one false-positive correctly caught and excluded)
 - [ ] Phase 10 — Cloud deployment
 - [ ] Phase 11 — Testing & evaluation
 - [ ] Phase 12 — Documentation & research paper

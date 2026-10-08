@@ -2,30 +2,96 @@
 
 **A real-time, explainable fraud detection platform with an agentic investigation copilot.**
 
-> Status: 🚧 In development — BTech final-year project. EDA, feature engineering, baseline modeling, hyperparameter tuning, SHAP explainability, the agentic investigation copilot, and a working FastAPI backend are complete; frontend and cloud deployment in progress.
+> Status: BTech final-year project. Phases 1-9 complete: EDA, feature engineering, baseline and tuned modeling with SHAP explainability, an evaluated LLM investigation agent, a FastAPI backend, an analyst dashboard, and MLOps (model registry, drift detection). Cloud deployment (Phase 10) is deferred. See the roadmap for why.
 
 ---
 
 ## 1. Problem Statement
 
-Financial institutions process millions of transactions daily; fraud-detection models exist, but the bottleneck has shifted from *detection* to *investigation throughput* — analysts spend disproportionate time manually assembling context per flagged case. FraudLens targets both: accurate, calibrated fraud scoring, and (upcoming) an automated evidence-assembly layer that turns a bare fraud score into an analyst-ready case file.
+Financial institutions process millions of transactions daily; fraud-detection models exist, but the bottleneck has shifted from *detection* to *investigation throughput* — analysts spend disproportionate time manually assembling context per flagged case. FraudLens targets both: accurate, explainable fraud scoring, and an automated evidence-assembly layer that turns a bare fraud score into an analyst-ready case file.
 
 ## 2. Architecture
 
-*(To be finalized once the backend/API layer is built — see roadmap below.)*
+Two paths: an **offline** pipeline that turns raw data into a trained, tracked model, and an **online** path that serves scores and investigations to an analyst. Everything below is as built, running locally.
+
+```
+OFFLINE: training pipeline
+--------------------------------------------------------------------
+ Raw data: IEEE-CIS (590K txns), PaySim (6.3M txns)
+      |
+      v   src/features.py
+ Feature pipeline: time decoding, frequency encoding, missingness
+ flags, correlation pruning, entity aggregations (card1+addr1)
+ Time-based split 70/15/15; every encoder fit on train only
+      |
+      v
+ data/processed/*.parquet
+      |
+      v   src/train_baseline.py, src/train_advanced.py
+ Models: LogReg, LightGBM, LightGBM+SMOTE (tuned), IsolationForest
+      |                       |
+      v                       v
+ MLflow runs            models/ieee_lightgbm_tuned.joblib
+ (mlflow.db, SQLite)    + metadata.json (features, 2%-FP threshold)
+                              |
+                              +--> src/register_model.py
+                              |      MLflow Model Registry, alias "production"
+                              +--> src/drift_check.py
+                                     PSI report (train vs val) in reports/
+
+
+ONLINE: serving path
+--------------------------------------------------------------------
+ Analyst browser: frontend/dashboard.html (React via CDN)
+      |  HTTP, CORS enabled
+      v
+ FastAPI: api/main.py
+   GET  /health
+   POST /score/{id}        POST /investigate/{id}
+   GET  /cases             GET  /cases/{id}
+      |                          |
+      |   both call the same scoring function
+      v                          v
+ Scoring: LightGBM predict_proba + SHAP top-5 reason codes
+ flagged = score >= threshold (2% false-positive budget)
+                                 |
+                                 |  /investigate only
+                                 v
+ Agent: src/agent.py
+   1. Evidence tools run deterministically (point-in-time:
+      only data up to this transaction's TransactionDT)
+   2. Policy match: TF-IDF over a policy corpus, query built
+      from the evidence, relevance floor
+   3. ONE Ollama call (llama3.1:8b) writes two narrative lines;
+      validated against tool output, one retry, else code-written
+   4. Recommended action + three other sections written by code
+      |
+      v
+ SQLite: cases.db (investigation log: score, threshold,
+ reason codes, case file)
+```
+
+**Design principle: the model writes prose, code makes decisions.** The 8B local model owns only two sentences (`ENTITY SUMMARY`, `TOP RISK FACTORS`), and every number in them is checked against the tool output. The related-entity signal, the policy citation, and the escalate/monitor recommendation are computed in Python from the evidence. This came out of the evaluation rounds in Section 8, where the model repeatedly contradicted its own evidence when it was allowed to decide.
+
+**What the diagram does not show, deliberately:**
+- The API loads `models/ieee_lightgbm_tuned.joblib` directly. The MLflow registry holds the same model under the `production` alias, but the serving path does not read from it yet. Loading by alias is the natural next step.
+- Only the IEEE-CIS model is served. PaySim was used for modeling experiments and the imbalance study (Section 7), not for the API or agent.
+- With no live transaction feed, the API looks transactions up by ID in the processed parquet files rather than ingesting raw events.
+
+**Departures from the original design, all deliberate:** SQLite instead of PostgreSQL; TF-IDF instead of a vector database (the policy corpus has six clauses); a local Ollama model instead of a hosted LLM API; PSI computed directly instead of Evidently AI; no Docker or cloud services yet (Phase 10, deferred). Each is explained in the section where it was made.
 
 ## 3. Tech Stack
 
 | Layer | Technology | Why |
 |---|---|---|
-| Data | Pandas, NumPy, PostgreSQL (planned) | Feature engineering and eventual storage layer |
+| Data | Pandas, NumPy, Parquet, SQLite | Feature engineering; parquet for processed splits, SQLite for the case log (PostgreSQL deferred, see Section 9) |
 | ML | scikit-learn, LightGBM, imbalanced-learn (SMOTE) | Cost-sensitive classification under class imbalance |
-| Experiment Tracking | MLflow (SQLite backend) | Every model run logged with params/metrics for honest comparison |
+| MLOps | MLflow (SQLite backend), Model Registry, PSI drift check | Every run logged for honest comparison; versioned model with a `production` alias; drift monitored (Section 11) |
 | GenAI | Llama 3.1 8B (Ollama, local), scikit-learn TF-IDF | Zero-cost, offline agent layer — see Section 8 |
 | Backend | FastAPI, SQLite | Real-time scoring, agent-triggered investigation, case log — 5 endpoints, working |
 | Frontend | React (CDN, no build step) | Analyst dashboard — single HTML file, see Section 10 |
-| Infra | Docker, GitHub Actions (planned) | Containerized deployment, CI |
-| Cloud | AWS (S3, Fargate, RDS, CloudWatch) (planned) | See full blueprint for service-by-service justification |
+| Infra | Not yet (Docker, GitHub Actions deferred) | Phase 10; the project currently runs locally |
+| Cloud | Not yet (AWS deferred) | Phase 10; see the roadmap for why the agent layer blocks a free-tier deployment |
 
 ## 4. Dataset
 
@@ -45,7 +111,7 @@ Baseline models trained and honestly compared across both datasets (see `src/tra
 
 ## 6. MLOps
 
-MLflow experiment tracking with a SQLite backend (`mlflow.db`); every training run logged with hyperparameters and metrics. Model registry and drift monitoring are complete (Phase 9 — see Section 11); CI/CD deployment is planned for a later phase.
+MLflow experiment tracking with a SQLite backend (`mlflow.db`); every training run logged with hyperparameters and metrics. Model registry and drift monitoring are complete (Phase 9 — see Section 11); CI/CD and deployment are deferred with Phase 10.
 
 ## 7. Results
 
@@ -187,7 +253,7 @@ See `reports/drift_report_train_vs_val.csv` and `reports/drift_report_top20.png`
 - [x] Phase 7 — Backend (FastAPI: scoring, agent-triggered investigation, SQLite case log — 5 endpoints, all tested working)
 - [x] Phase 8 — Frontend (single-file React dashboard, no build step; full-stack verified against all 5 validation cases: score, SHAP reason codes, agent case files, investigation history)
 - [x] Phase 9 — MLOps (MLflow model registry with alias-based promotion; PSI-based drift detection — 7/545 features genuinely drifted, with one false-positive correctly caught and excluded)
-- [ ] Phase 10 — Cloud deployment
+- [ ] Phase 10 — Cloud deployment *(deferred, not abandoned: the agent runs Llama 3.1 8B locally via Ollama, which needs ~6GB RAM, well beyond free or low-cost cloud instance sizes. The scoring API alone (FastAPI + LightGBM + SHAP) is small enough for a basic EC2 instance and is the natural first step if this is deployed later; the LLM agent would then need either a larger instance or a hosted model API.)*
 - [ ] Phase 11 — Testing & evaluation
 - [ ] Phase 12 — Documentation & research paper
 

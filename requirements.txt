@@ -1,0 +1,17 @@
+# Direct runtime dependencies for FraudLens, pinned to versions in the Python 3.13 environment.
+# NOTE: The investigation agent (src/agent.py) additionally requires a LOCAL Ollama install
+# with the llama3.1:8b model pulled: `ollama pull llama3.1:8b`
+pandas==3.0.0
+numpy==2.2.6
+scikit-learn==1.8.0
+scipy==1.17.1
+lightgbm==4.7.0
+imbalanced-learn==0.14.2
+mlflow==3.16.0
+shap==0.52.0
+joblib==1.5.3
+pyarrow==25.0.1
+matplotlib==3.10.7
+fastapi==0.136.1
+uvicorn==0.46.0
+ollama==0.6.2

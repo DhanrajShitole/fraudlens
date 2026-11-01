@@ -1,32 +1,33 @@
-# FraudLens — scoring API container
-# Base: python:3.13-slim (matches the dev environment)
+# FraudLens API — production container
 FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install OS-level build dependencies required by some wheels
+# System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc \
-        g++ \
-        libgomp1 \
+    gcc \
+    g++ \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy only requirements first so Docker can cache the layer
+# Install Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Install exact pinned versions from requirements.txt
-# (pandas, numpy, scikit-learn, lightgbm, shap, joblib, pyarrow, mlflow,
-#  fastapi, uvicorn, ollama — all pinned in requirements.txt)
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application source — do NOT bake in data/, models/, mlflow.db or mlruns/
-# (those are mounted as volumes at runtime via docker-compose.yml)
+# Copy application source
 COPY api/ api/
 COPY src/ src/
 
-# Expose the API port
+# Copy the model and metadata required by the API
+COPY models/ieee_lightgbm_tuned.joblib models/
+COPY models/ieee_lightgbm_tuned_metadata.json models/
+
+# Copy the datasets required for transaction lookup
+COPY data/processed/ieee_train.parquet data/processed/
+COPY data/processed/ieee_val.parquet data/processed/
+
+# Render supplies PORT; use 8000 locally as the fallback
 EXPOSE 8000
 
-# Start the FastAPI service
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
+CMD ["sh", "-c", "uvicorn api.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

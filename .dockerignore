@@ -1,12 +1,21 @@
-# Exclude large data/model artifacts and dev-only files from the Docker build context.
-# The Dockerfile copies api/ and src/ only; everything else is mounted at runtime.
-data/
-models/
+# Exclude everything in data except the required runtime datasets
+data/*
+!data/processed/
+data/processed/*
+!data/processed/ieee_train.parquet
+!data/processed/ieee_val.parquet
+
+# Exclude everything in models except the runtime model and metadata
+models/*
+!models/ieee_lightgbm_tuned.joblib
+!models/ieee_lightgbm_tuned_metadata.json
+
+# Exclude development and MLflow artifacts
 mlruns/
 mlflow.db
 cases.db
-.git
-__pycache__
+.git/
+__pycache__/
 tests/
 notebooks/
 reports/
@@ -15,5 +24,5 @@ frontend/
 *.pyo
 .pytest_cache/
 .venv/
+venv/
 *.egg-info/
-

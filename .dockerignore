@@ -4,6 +4,7 @@ data/*
 data/processed/*
 !data/processed/ieee_train.parquet
 !data/processed/ieee_val.parquet
+!data/processed/ieee_val_api.parquet
 
 # Exclude everything in models except the runtime model and metadata
 models/*

@@ -27,8 +27,8 @@ COPY src/ src/
 COPY models/ieee_lightgbm_tuned.joblib models/
 COPY models/ieee_lightgbm_tuned_metadata.json models/
 
-# Validation data required for transaction lookup
-COPY data/processed/ieee_val.parquet data/processed/
+# Generate with scripts/prepare_api_validation_data.py before building.
+COPY data/processed/ieee_val_api.parquet data/processed/
 
 EXPOSE 10000
 

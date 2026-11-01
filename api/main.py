@@ -11,7 +11,7 @@ Endpoints:
     GET  /cases/{case_id}                 — retrieve one past investigation
 
 Data note: this demo API scores transactions that already exist in the
-processed validation set (data/processed/ieee_val.parquet), simulating
+processed validation set (data/processed/ieee_val_api.parquet), simulating
 what a real-time feed would look like. A production version would accept
 raw transaction fields in the POST body instead of a lookup ID — this is
 a deliberate simplification appropriate for a final-year project without
@@ -34,7 +34,7 @@ from contextlib import asynccontextmanager
 
 import joblib
 import numpy as np
-import pandas as pd
+import pyarrow.dataset as ds
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -93,24 +93,14 @@ async def lifespan(app: FastAPI):
     with open(metadata_path, encoding="utf-8") as f:
         _state["metadata"] = json.load(f)
 
-    # Load only the validation dataset and only the required columns.
-    print("Loading validation transactions...")
-
-    feature_columns = _state["metadata"]["feature_columns"]
-
-    required_columns = list(dict.fromkeys(
-        ["TransactionID"] + feature_columns
-    ))
-
+    # Keep the validation dataset on disk. Loading every validation row
+    # into pandas is unnecessary for an API that looks up one transaction at
+    # a time. Arrow scans only the matching row group and requested columns.
     val_path = os.path.join(
         DATA_DIR,
-        "ieee_val.parquet"
+        "ieee_val_api.parquet"
     )
-
-    _state["val_data"] = pd.read_parquet(
-        val_path,
-        columns=required_columns
-    )
+    _state["val_dataset"] = ds.dataset(val_path, format="parquet")
 
     # SHAP is optional to reduce startup memory consumption.
     _state["shap_explainer"] = None
@@ -132,7 +122,7 @@ async def lifespan(app: FastAPI):
     print(
         f"Startup complete. "
         f"model_source={_state['model_source']}, "
-        f"transactions={len(_state['val_data'])}"
+        "validation_data=lazy"
     )
 
     yield
@@ -190,11 +180,31 @@ def _score_internal(transaction_id: int) -> ScoreResponse:
     feats = _state["metadata"]["feature_columns"]
     threshold = _state["metadata"]["threshold_2pct_fp_budget"]
 
-    row = _state["val_data"][_state["val_data"]["TransactionID"] == transaction_id]
-    if row.empty:
+    # ``val_data`` remains supported for callers/tests that inject an in-memory
+    # fixture. Production uses a filtered Arrow scan and materializes only one
+    # transaction's feature values.
+    if "val_data" in _state:
+        matches = _state["val_data"][_state["val_data"]["TransactionID"] == transaction_id]
+        if matches.empty:
+            raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
+        row = matches[feats]
+    else:
+        dataset = _state["val_dataset"]
+        columns = list(dict.fromkeys(["TransactionID"] + feats))
+        table = dataset.to_table(
+            columns=columns,
+            filter=ds.field("TransactionID") == transaction_id,
+        )
+        if table.num_rows == 0:
+            raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
+        # Preserve the trained estimator's DataFrame feature names and order.
+        import pandas as pd
+        row = table.select(feats).to_pandas()
+
+    if len(row) == 0:
         raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
 
-    X = row[feats].fillna(-999)
+    X = row.fillna(-999)
     risk_score = float(_state["model"].predict_proba(X)[:, 1][0])
 
     top_reasons = []
@@ -207,7 +217,7 @@ def _score_internal(transaction_id: int) -> ScoreResponse:
         for i in top_idx:
             top_reasons.append({
                 "feature": feats[i],
-                "value": float(X.iloc[0, i]),
+                "value": float(X.iat[0, i]),
                 "shap_contribution": round(float(contributions[i]), 5),
             })
 

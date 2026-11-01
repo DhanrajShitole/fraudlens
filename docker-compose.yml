@@ -2,7 +2,7 @@ services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "8000:10000"
     volumes:
       # Mount runtime artifacts from the host; not baked into the image.
       # mlflow.db stores absolute host paths so registry load may fail inside

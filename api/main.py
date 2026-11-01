@@ -36,8 +36,6 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-import mlflow
-import mlflow.lightgbm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -75,51 +73,70 @@ def _init_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Loading model and metadata...")
+    print("Loading FraudLens model...")
 
-    # ── Try loading from MLflow registry first ──────────────────────────────
-    # Set tracking URI to the same sqlite DB used by training scripts.
-    mlflow.set_tracking_uri(f"sqlite:///{os.path.join(BASE_DIR, 'mlflow.db')}")
-    registry_loaded = False
-    try:
-        registry_model = mlflow.lightgbm.load_model("models:/fraudlens-ieee-lightgbm@production")
-        # Validate: must have predict_proba AND support TreeExplainer.
-        if not hasattr(registry_model, "predict_proba"):
-            raise ValueError("Registry model has no predict_proba method.")
-        import shap as _shap_test
-        _shap_test.TreeExplainer(registry_model)  # raises if incompatible
-        _state["model"] = registry_model
-        _state["model_source"] = "registry:fraudlens-ieee-lightgbm@production"
-        registry_loaded = True
-        print(f"Loaded model from MLflow registry (fraudlens-ieee-lightgbm@production).")
-    except Exception as _reg_err:
-        print(f"WARNING: Could not load model from MLflow registry ({type(_reg_err).__name__}: {_reg_err}). "
-              f"Falling back to local joblib model.")
-        _state["model"] = joblib.load(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned.joblib"))
-        _state["model_source"] = "joblib-fallback"
+    # Load the local trained model directly.
+    model_path = os.path.join(
+        MODELS_DIR,
+        "ieee_lightgbm_tuned.joblib"
+    )
 
-    with open(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned_metadata.json")) as f:
+    _state["model"] = joblib.load(model_path)
+    _state["model_source"] = "joblib"
+
+    # Load model metadata.
+    metadata_path = os.path.join(
+        MODELS_DIR,
+        "ieee_lightgbm_tuned_metadata.json"
+    )
+
+    with open(metadata_path, encoding="utf-8") as f:
         _state["metadata"] = json.load(f)
-    print("Loading transactions for lookup (train + val combined, matching agent.py's scope)...")
-    train_data = pd.read_parquet(os.path.join(DATA_DIR, "ieee_train.parquet"))
-    val_data = pd.read_parquet(os.path.join(DATA_DIR, "ieee_val.parquet"))
-    _state["val_data"] = pd.concat([train_data, val_data], ignore_index=True)
-    # Kept the attribute name "val_data" so nothing else in this file needs renaming —
-    # it now holds train+val combined, exactly like agent.py's _all_txns. This is a
-    # lookup convenience for a demo without a live feed, not a claim that scoring a
-    # train-seen transaction proves anything about generalization — the model and its
-    # 2%-FP threshold were still selected using val-set metrics only (see README).
 
-    try:
-        import shap
-        _state["shap_explainer"] = shap.TreeExplainer(_state["model"])
-    except ImportError:
-        print("WARNING: shap not installed — /score will skip reason codes.")
-        _state["shap_explainer"] = None
+    # Load only the validation dataset and only the required columns.
+    print("Loading validation transactions...")
+
+    feature_columns = _state["metadata"]["feature_columns"]
+
+    required_columns = list(dict.fromkeys(
+        ["TransactionID"] + feature_columns
+    ))
+
+    val_path = os.path.join(
+        DATA_DIR,
+        "ieee_val.parquet"
+    )
+
+    _state["val_data"] = pd.read_parquet(
+        val_path,
+        columns=required_columns
+    )
+
+    # SHAP is optional to reduce startup memory consumption.
+    _state["shap_explainer"] = None
+
+    enable_shap = os.getenv("ENABLE_SHAP", "false").lower() == "true"
+
+    if enable_shap:
+        try:
+            import shap
+            _state["shap_explainer"] = shap.TreeExplainer(
+                _state["model"]
+            )
+            print("SHAP explainability enabled.")
+        except Exception as exc:
+            print(f"WARNING: SHAP initialization failed: {exc}")
 
     _init_db()
-    print(f"Startup complete. model_source={_state['model_source']}")
+
+    print(
+        f"Startup complete. "
+        f"model_source={_state['model_source']}, "
+        f"transactions={len(_state['val_data'])}"
+    )
+
     yield
+
     print("Shutting down.")
 
 

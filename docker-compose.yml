@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount runtime artifacts from the host; not baked into the image.
+      # mlflow.db stores absolute host paths so registry load may fail inside
+      # the container; the joblib fallback handles this transparently.
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./mlflow.db:/app/mlflow.db
+      - ./mlruns:/app/mlruns
+    environment:
+      # Point Ollama client at the host-side Ollama daemon
+      - OLLAMA_HOST=http://host.docker.internal:11434
+

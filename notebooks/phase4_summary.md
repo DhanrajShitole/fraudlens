@@ -1,3 +1,5 @@
+Superseded for PaySim numbers: see the measurement correction in README Section 7.
+
 ## Phase 4 Summary — Baseline Modeling
 
 ### IEEE-CIS (moderate imbalance, 27.4:1)

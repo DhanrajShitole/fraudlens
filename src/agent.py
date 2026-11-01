@@ -417,6 +417,12 @@ _BANNED_TEXT_RE = re.compile(
     r"cross-border|countr(?:y|ies)|fraud ring|unusual|abnormal|anomal\w*)\b", re.IGNORECASE)
 _WINDOW_30D_RE = re.compile(r"\b30[- ]?days?\b|\bmonth\b", re.IGNORECASE)
 _WINDOW_24H_RE = re.compile(r"\b24[- ]?hours?\b|\blast day\b", re.IGNORECASE)
+_COMPARATIVE_RE = re.compile(
+    r"\b(greater\s+than|less\s+than|higher\s+than|lower\s+than|more\s+than"
+    r"|above|below|compared\s+to|versus|relative\s+to"
+    r"|than\s+the\s+(?:overall|average|typical|mean))\b",
+    re.IGNORECASE)
+
 
 
 def _numbers_in(text: str) -> set:
@@ -424,8 +430,12 @@ def _numbers_in(text: str) -> set:
     return {round(float(m.replace(",", "").rstrip(".")), 2) for m in _NUM_RE.findall(text)}
 
 
-def _grounded_numbers(value) -> set:
-    """Every number that literally appears as a value in the tool results."""
+def _grounded_numbers(value, _key: str = "") -> set:
+    """Every number that literally appears as a numeric value in get_entity_history
+    or get_related_entities results (including numbers embedded in their entity_key
+    strings).  Numbers inside retrieve_policy_clause and inside any 'note' string
+    at any level are explicitly excluded -- they are policy text / bookkeeping, not
+    evidence the model is permitted to cite."""
     if isinstance(value, bool):
         return set()
     if isinstance(value, (int, float)):
@@ -433,21 +443,32 @@ def _grounded_numbers(value) -> set:
     if isinstance(value, str):
         return _numbers_in(value)
     if isinstance(value, dict):
-        return set().union(*[_grounded_numbers(v) for v in value.values()]) if value else set()
+        out: set = set()
+        for k, v in value.items():
+            # Skip the whole retrieve_policy_clause branch
+            if k == "retrieve_policy_clause":
+                continue
+            # Skip any 'note' key at any nesting level
+            if k == "note":
+                continue
+            out |= _grounded_numbers(v, _key=k)
+        return out
     if isinstance(value, (list, tuple)):
-        return set().union(*[_grounded_numbers(v) for v in value]) if value else set()
+        return set().union(*[_grounded_numbers(v, _key=_key) for v in value]) if value else set()
     return set()
 
 
 def _model_text_clean(text: str, tool_results: dict) -> bool:
     """True only if a model-written section makes no claim the tool results
     don't support: no unsupported numbers, no time window attached to a count
-    that isn't that window's count, no evaluative/geographic words, no field names."""
+    that isn't that window's count, no evaluative/geographic words, no field names,
+    no comparative framing without two distinct grounded numbers in the same sentence."""
     if not text:
         return False
     if _BANNED_TEXT_RE.search(text) or _SNAKE_RE.search(text):
         return False
-    if not _numbers_in(text) <= _grounded_numbers(tool_results):
+    grounded = _grounded_numbers(tool_results)
+    if not _numbers_in(text) <= grounded:
         return False
     n24 = tool_results.get("get_entity_history", {}).get("transactions_last_24_hours")
     d30 = tool_results.get("get_related_entities", {}).get("distinct_email_domains_last_30_days")
@@ -457,6 +478,13 @@ def _model_text_clean(text: str, tool_results: dict) -> bool:
             return False
         if _WINDOW_24H_RE.search(chunk) and not (isinstance(n24, int) and float(n24) in nums):
             return False
+        # Reject comparative framing unless the sentence contains two DIFFERENT
+        # grounded numbers — e.g. "greater than the overall mean" with only one
+        # number is a vacuous hallucinated comparison.
+        if _COMPARATIVE_RE.search(chunk):
+            sentence_grounded = nums & grounded
+            if len(sentence_grounded) < 2:
+                return False
     return True
 
 

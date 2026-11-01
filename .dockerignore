@@ -1,0 +1,19 @@
+# Exclude large data/model artifacts and dev-only files from the Docker build context.
+# The Dockerfile copies api/ and src/ only; everything else is mounted at runtime.
+data/
+models/
+mlruns/
+mlflow.db
+cases.db
+.git
+__pycache__
+tests/
+notebooks/
+reports/
+frontend/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+*.egg-info/
+

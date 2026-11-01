@@ -1,6 +1,7 @@
 # --- Data (never commit raw datasets) ---
 data/
 *.csv
+!reports/*.csv
 *.parquet
 cases.db
 

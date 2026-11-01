@@ -137,14 +137,40 @@ Hyperparameter tuning (RandomizedSearchCV, PR-AUC-scored, 3-fold CV) improved PR
 
 All four rank in the top 7% of features — validating the Phase 3 design decision to build entity signal from these fields instead of the sparser device/IP columns.
 
-### PaySim (1,221.6:1 imbalance)
+### Final held-out test evaluation
 
-| Model | PR-AUC | ROC-AUC | Recall @ 2% FP budget | F1 @ budget |
-|---|---|---|---|---|
-| **LightGBM + scale_pos_weight (best)** | **0.011** | **0.949** | **94.5%** | **0.023** |
-| Isolation Forest (unsupervised) | 0.002 | 0.840 | 2.5% | 0.001 |
+Run once on the untouched test set (`src/evaluate_test.py`, full report in `reports/test_evaluation.md`). Thresholds were chosen on validation and applied unchanged.
 
-**Key finding:** we hypothesized PaySim's extreme imbalance would favor unsupervised anomaly detection over supervised learning. The opposite was true — supervised LightGBM won decisively. We attribute this to PaySim's highly structured fraud pattern (confined to 2 transaction types with a clean account-draining signature), which a supervised model learns efficiently even from few positive examples, while Isolation Forest instead flags generic statistical outliers that are mostly legitimate. This negative result for the anomaly-detection hypothesis is documented rather than hidden — see `phase4_summary.md` for the full writeup, including the caveat that PaySim's synthetic fraud pattern is more learnable than real-world fraud would likely be.
+**IEEE-CIS** (threshold 0.129, chosen for a 2% false-positive rate on validation):
+
+| Metric | Validation | Test |
+|---|---|---|
+| PR-AUC | 0.598 | **0.532** (15x the 3.5% base rate) |
+| ROC-AUC | 0.924 | 0.907 |
+| Recall | 57.9% | 53.4% |
+| Precision | 50.7% | 44.0% |
+| False-positive rate (target 2%) | 2.00% | 2.46% (budget slipped on unseen data) |
+
+Performance drops modestly from validation to test, consistent with the drift measured in Section 11. Calibration on test: Brier 0.0221 vs 0.0336 for always predicting the base rate (34% better). Mean predicted risk is 3.19% vs 3.48% observed, so the model slightly *understates* risk (mainly in the 8th and 9th deciles) and is roughly calibrated, not inflated.
+
+### PaySim (1,221.6:1 imbalance in training)
+
+Scored with raw model margins so the 2% false-positive budget is reachable (see correction below). Threshold chosen on validation:
+
+| Metric | Validation | Test |
+|---|---|---|
+| ROC-AUC | 0.986 | 0.986 |
+| Recall at the 2% false-positive threshold | 86.8% | 86.9% |
+| Actual false-positive rate | 2.00% | 2.06% |
+| Precision | 2.5% | 15.1% |
+| Share of all transactions flagged | 2.05% | 2.41% |
+| PR-AUC | 0.151 | 0.446 (not comparable: base rate rose 0.059% to 0.42%) |
+
+Isolation Forest (unsupervised) scored ROC-AUC 0.840 and PR-AUC 0.002 on validation, far below supervised LightGBM.
+
+**Measurement correction:** earlier Phase 4 PaySim figures (PR-AUC 0.011, ROC-AUC 0.949 and "94.5% recall at a 2% false-positive budget") came from probabilities that saturate at 1.0. More than 2% of legitimate transactions tied at that score, so the threshold was 1.0 and the real false-positive rate was 4.7%. Raw-margin scoring removes the ties and shows the true ranking quality; the old 94.5% claim is retracted. `phase4_summary.md` keeps the original numbers as a historical record.
+
+**Key finding:** we hypothesized extreme imbalance would favor unsupervised anomaly detection. The opposite was true: supervised LightGBM won decisively, because PaySim's fraud is highly structured (only TRANSFER and CASH_OUT, with a clean account-draining pattern) while Isolation Forest flags generic outliers that are mostly legitimate. Caveats: PaySim is synthetic, so its fraud is easier than real fraud, and the fraud base rate shifted 7x between validation and test, so compare ROC-AUC and recall at a fixed false-positive rate, not PR-AUC or lift (both depend on the base rate).
 
 ## 8. Agentic Investigation Copilot (Phase 6)
 
@@ -194,6 +220,8 @@ Once correctness was validated, real usage surfaced a usability problem: investi
 
 **Fix:** the two evidence tools and the policy match now always run deterministically up front (no model decision involved), and the model is asked for its two sentences in a **single** completion call given that evidence directly, with at most one retry if the response fails validation. This cut the common case from 2-3 model calls to 1 — validated with 5 synthetic test scenarios (happy path, validation-failure-then-retry, double-failure-to-fallback, missing-entity-data, and a simulated Ollama crash) covering every code path before being tested against the real model, where it was confirmed both faster and no regression in output quality.
 
+**Validator tightened:** numbers in the two model-written sentences must now come from the evidence tools (not from policy text), and unsupported comparisons such as 'greater than the overall mean' are rejected, closing the two known gaps found in the evaluation.
+
 ## 9. Backend API (Phase 7)
 
 A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, and the agent together into 5 real endpoints:
@@ -211,6 +239,14 @@ A working FastAPI service (`api/main.py`) ties the model, SHAP explainability, a
 **Documented simplification:** since this project has no live transaction stream, `/score` and `/investigate` look up transactions that already exist in the processed dataset by ID (train+val combined, matching the scope `agent.py`'s tools already searched — an early version only searched val, which caused real lookup failures for train-set IDs used during agent testing), rather than accepting arbitrary raw transaction data in the request body. One honest caveat: scoring a **train-set** transaction will look unrealistically confident, since the model saw that row's label during training — the Phase 4/5 evaluation metrics (PR-AUC, recall@budget) remain valid regardless, as those were computed on held-out val/test data only, never train. For a demo that fairly represents real model performance, deliberately pick a val-set ID.
 
 **Case persistence:** investigations are logged to a local SQLite database (`cases.db`, gitignored — regenerate by running the API) rather than the originally-planned PostgreSQL, since a single-file database is a reasonable, honest choice at this project's current scale; migrating to Postgres remains a natural next step if this were pushed toward production.
+
+### Run with Docker (local)
+
+```bash
+docker compose up --build
+```
+
+The image holds only the code. `data/`, `models/`, `mlflow.db` and `mlruns/` are mounted from your machine, so run the training pipeline first. The API is served at http://127.0.0.1:8000. `/investigate` calls Ollama on the host (`OLLAMA_HOST`), so Ollama must be running there. If the MLflow registry path cannot be resolved inside the container, the API falls back to the joblib model (`/health` reports `model_source`). This is local containerization only; cloud deployment is deferred (Phase 10).
 
 ## 10. Frontend Dashboard (Phase 8)
 
@@ -253,17 +289,31 @@ See `reports/drift_report_train_vs_val.csv` and `reports/drift_report_top20.png`
 - [x] Phase 7 — Backend (FastAPI: scoring, agent-triggered investigation, SQLite case log — 5 endpoints, all tested working)
 - [x] Phase 8 — Frontend (single-file React dashboard, no build step; full-stack verified against all 5 validation cases: score, SHAP reason codes, agent case files, investigation history)
 - [x] Phase 9 — MLOps (MLflow model registry with alias-based promotion; PSI-based drift detection — 7/545 features genuinely drifted, with one false-positive correctly caught and excluded)
-- [ ] Phase 10 — Cloud deployment *(deferred, not abandoned: the agent runs Llama 3.1 8B locally via Ollama, which needs ~6GB RAM, well beyond free or low-cost cloud instance sizes. The scoring API alone (FastAPI + LightGBM + SHAP) is small enough for a basic EC2 instance and is the natural first step if this is deployed later; the LLM agent would then need either a larger instance or a hosted model API.)*
-- [ ] Phase 11 — Testing & evaluation
-- [ ] Phase 12 — Documentation & research paper
+- [x] Phase 10 ? Containerization & deployment packaging (Docker & docker-compose created; hybrid deployment architecture separating lightweight scoring container from private local Ollama instance)
+- [x] Phase 11 ? Testing & evaluation (51 automated pytest tests across agent logic, API contracts, drift detection, and model/SHAP validation; one-shot held-out test evaluation with calibration reports in reports/test_evaluation.md)
+- [x] Phase 12 ? Documentation & research paper (README updated; PROJECT_STATUS.md audit log; complete technical paper draft in reports/research_paper_draft.md)
 
 ## Setup
 
 ```bash
 git clone https://github.com/DhanrajShitole/FraudLens
 cd FraudLens
-pip install pandas numpy scikit-learn lightgbm imbalanced-learn mlflow matplotlib seaborn pyarrow
+pip install -r requirements.txt pytest
 ```
+
+### Running Tests
+
+```bash
+# Run the complete test suite (51 unit, integration, drift & model tests)
+python -m pytest tests/ -v
+```
+
+### Starting the Serving Backend
+
+```bash
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+```
+Then open `frontend/dashboard.html` in your web browser.
 
 ## Data Access
 

@@ -146,6 +146,62 @@ class TestModelTextClean:
             "Should accept grounded, plain sentence"
         )
 
+    # ── New tests required by Task 1 ──────────────────────────────────────────
+
+    def test_ungrounded_number_rejected_even_with_policy(self, tmp_agent_env):
+        """
+        Task 1c: An ungrounded number (3) must be rejected even when a policy
+        clause is present in tool_results.  Policy numbers are not grounded
+        evidence — they are bookkeeping text the model must not cite.
+        """
+        agent, _ = tmp_agent_env
+        tool_results = self._make_tool_results(n_txns=5, total_amount=750.0)
+        # Add a policy clause whose text contains the number 3 (threshold text)
+        tool_results["retrieve_policy_clause"] = {
+            "policy_id": "POL-003",
+            "title": "Email Domain Fraud Ring Indicator",
+            "text": (
+                "A single billing address associated with more than 3 distinct email "
+                "domains within a 30-day period is a strong indicator of a coordinated "
+                "fraud ring."
+            ),
+            "relevance_score": 0.42,
+            "matched_on": "threshold exceeded",
+        }
+        # "3" appears only in the policy clause, NOT in entity-history or related-entity values
+        text = "This entity has 3 email domains on record."
+        assert not agent._model_text_clean(text, tool_results), (
+            "Should reject '3' sourced only from policy clause text, not from evidence tools"
+        )
+
+    def test_rejects_self_referential_comparative(self, tmp_agent_env):
+        """
+        Task 1c: 'Mean transaction amount of $144.14 is greater than the overall
+        mean of $144.14' — contains comparative framing with only ONE distinct
+        grounded number (144.14 == 144.14), so it must be rejected.
+        """
+        agent, _ = tmp_agent_env
+        # Build tool_results with mean_amount=144.14 so 144.14 is grounded
+        tool_results = self._make_tool_results(
+            n_txns=7, total_amount=1009.0, mean_amount=144.14, this_amount=144.14
+        )
+        text = "Mean transaction amount of $144.14 is greater than the overall mean of $144.14."
+        assert not agent._model_text_clean(text, tool_results), (
+            "Should reject comparative framing when only one distinct grounded number is present"
+        )
+
+    def test_accepts_plain_grounded_sentence_no_comparison(self, tmp_agent_env):
+        """
+        Task 1c: A sentence with a grounded number and no comparative framing
+        must be accepted — verifies the comparative check does not over-reject.
+        """
+        agent, _ = tmp_agent_env
+        tool_results = self._make_tool_results(n_txns=7, total_amount=1009.0, mean_amount=144.14)
+        text = "The mean transaction amount for this entity is $144.14."
+        assert agent._model_text_clean(text, tool_results), (
+            "Should accept a plain grounded sentence with no comparative framing"
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # (c) _recommended_action policy
@@ -241,14 +297,18 @@ class TestInvestigate:
     def test_invalid_then_valid_exactly_2_calls(self, tmp_agent_env):
         """
         First response invalid (no ENTITY SUMMARY label), second valid -> 2 calls.
+        Fixed: use grounded numbers from real tool output so the validator accepts
+        the second response (old test used a hardcoded '3' that is ungrounded for
+        TxID 2001, which has total_transactions_by_entity=1).
         """
         agent, fake_ollama = tmp_agent_env
+        n = agent.get_entity_history(2001)["total_transactions_by_entity"]
         fake_ollama.responses = [
             # Invalid: missing required labels entirely
             "I think this is a risky transaction with unusual activity.",
-            # Valid: proper format with grounded numbers
-            "ENTITY SUMMARY: This entity has 3 transactions.\n"
-            "TOP RISK FACTORS:\n• Transaction count: 3",
+            # Valid: proper format with grounded numbers from tool output
+            f"ENTITY SUMMARY: This entity has {n} transaction on record.\n"
+            f"TOP RISK FACTORS:\n• Transaction count: {n}",
         ]
         result = agent.investigate(2001, verbose=False)
         assert fake_ollama.call_count == 2, (

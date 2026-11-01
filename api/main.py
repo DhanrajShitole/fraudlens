@@ -36,6 +36,8 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+import mlflow
+import mlflow.lightgbm
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -74,7 +76,28 @@ def _init_db():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Loading model and metadata...")
-    _state["model"] = joblib.load(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned.joblib"))
+
+    # ── Try loading from MLflow registry first ──────────────────────────────
+    # Set tracking URI to the same sqlite DB used by training scripts.
+    mlflow.set_tracking_uri(f"sqlite:///{os.path.join(BASE_DIR, 'mlflow.db')}")
+    registry_loaded = False
+    try:
+        registry_model = mlflow.lightgbm.load_model("models:/fraudlens-ieee-lightgbm@production")
+        # Validate: must have predict_proba AND support TreeExplainer.
+        if not hasattr(registry_model, "predict_proba"):
+            raise ValueError("Registry model has no predict_proba method.")
+        import shap as _shap_test
+        _shap_test.TreeExplainer(registry_model)  # raises if incompatible
+        _state["model"] = registry_model
+        _state["model_source"] = "registry:fraudlens-ieee-lightgbm@production"
+        registry_loaded = True
+        print(f"Loaded model from MLflow registry (fraudlens-ieee-lightgbm@production).")
+    except Exception as _reg_err:
+        print(f"WARNING: Could not load model from MLflow registry ({type(_reg_err).__name__}: {_reg_err}). "
+              f"Falling back to local joblib model.")
+        _state["model"] = joblib.load(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned.joblib"))
+        _state["model_source"] = "joblib-fallback"
+
     with open(os.path.join(MODELS_DIR, "ieee_lightgbm_tuned_metadata.json")) as f:
         _state["metadata"] = json.load(f)
     print("Loading transactions for lookup (train + val combined, matching agent.py's scope)...")
@@ -95,7 +118,7 @@ async def lifespan(app: FastAPI):
         _state["shap_explainer"] = None
 
     _init_db()
-    print("Startup complete.")
+    print(f"Startup complete. model_source={_state['model_source']}")
     yield
     print("Shutting down.")
 
@@ -139,6 +162,7 @@ def health():
         "status": "ok",
         "model_loaded": "model" in _state,
         "model_type": _state.get("metadata", {}).get("model_type", "unknown"),
+        "model_source": _state.get("model_source", "unknown"),
     }
 
 

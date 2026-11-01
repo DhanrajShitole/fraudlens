@@ -330,6 +330,7 @@ function App() {
       const res = await fetch(`${apiBase}/cases/${caseId}`);
       if (!res.ok) return;
       const data = await res.json();
+      setErrorMsg(null);
       setTxnId(String(data.transaction_id));
       setScore({
         transaction_id: data.transaction_id,
@@ -362,6 +363,7 @@ function App() {
             placeholder="e.g. 3400379"
             value={txnId}
             onChange={e => setTxnId(e.target.value.replace(/[^0-9]/g, ""))}
+            onKeyDown={e => { if (e.key === "Enter" && txnId && !loading) handleScore(); }}
           />
         </div>
 

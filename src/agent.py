@@ -532,10 +532,17 @@ def _model_text_clean(text: str, tool_results: dict) -> bool:
     if _BANNED_TEXT_RE.search(text) or _SNAKE_RE.search(text):
         return False
     grounded = _grounded_numbers(tool_results)
-    if not _numbers_in(text) <= grounded:
-        return False
     n24 = tool_results.get("get_entity_history", {}).get("transactions_last_24_hours")
     d30 = tool_results.get("get_related_entities", {}).get("distinct_email_domains_last_30_days")
+    # The model may write "last 24 hours" or "last 30 days" when those windowed
+    # fields are present.  24 and 30 are system-defined window labels, not invented
+    # values, so permit them whenever the corresponding field exists in tool results.
+    if isinstance(n24, int):
+        grounded |= {24.0}
+    if isinstance(d30, int):
+        grounded |= {30.0}
+    if not _numbers_in(text) <= grounded:
+        return False
     for chunk in re.split(r"(?<=[.!?])\s+|\n", text):
         nums = _numbers_in(chunk)
         if _WINDOW_30D_RE.search(chunk) and not (isinstance(d30, int) and float(d30) in nums):
@@ -672,12 +679,24 @@ def _generate_narrative(tool_results: dict, verbose: bool, stats: dict, messages
         if verbose:
             print(f"  [model call {attempt+1}] {len(text)} chars")
 
-        summary = _model_section(text, "ENTITY SUMMARY:") or _model_section("ENTITY SUMMARY: " + text if "ENTITY SUMMARY:" not in text else text, "ENTITY SUMMARY:")
-        # Simpler and more robust for a 2-section-only response than the old
-        # multi-section parser: split on the TOP RISK FACTORS: label directly.
+        # Parse the two model-owned sections.
+        # Primary path: both labels are present (ideal model behaviour).
         if "ENTITY SUMMARY:" in text and "TOP RISK FACTORS:" in text:
             summary = text.split("ENTITY SUMMARY:", 1)[1].split("TOP RISK FACTORS:", 1)[0].strip()
             risks = text.split("TOP RISK FACTORS:", 1)[1].strip()
+        elif "ENTITY SUMMARY:" in text:
+            # The model sometimes omits the TOP RISK FACTORS: label and places
+            # bullet lines immediately after the summary paragraph.  Split on
+            # the first bullet character so we still capture both sections.
+            after_summary = text.split("ENTITY SUMMARY:", 1)[1]
+            bullet_match = re.search(r"(?:^|\n)\s*[\u2022*\-]", after_summary, re.MULTILINE)
+            if bullet_match:
+                summary = after_summary[:bullet_match.start()].strip()
+                risks = after_summary[bullet_match.start():].strip()
+            else:
+                # No bullets found -- treat all text after the label as summary.
+                summary = after_summary.strip()
+                risks = ""
         else:
             summary, risks = "", ""
 

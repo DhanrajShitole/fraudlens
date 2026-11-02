@@ -1,10 +1,10 @@
-# Exclude everything in data except the required runtime datasets
+# Runtime datasets are preprocessed locally; keep large raw/training files out
+# of the build context and include only the API and compact investigation files.
 data/*
 !data/processed/
 data/processed/*
-!data/processed/ieee_train.parquet
-!data/processed/ieee_val.parquet
 !data/processed/ieee_val_api.parquet
+!data/processed/ieee_investigation_context.parquet
 
 # Exclude everything in models except the runtime model and metadata
 models/*

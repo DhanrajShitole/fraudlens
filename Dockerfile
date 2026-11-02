@@ -27,8 +27,10 @@ COPY src/ src/
 COPY models/ieee_lightgbm_tuned.joblib models/
 COPY models/ieee_lightgbm_tuned_metadata.json models/
 
-# Generate with scripts/prepare_api_validation_data.py before building.
+# Generate with scripts/prepare_api_validation_data.py and
+# scripts/prepare_investigation_context.py before building.
 COPY data/processed/ieee_val_api.parquet data/processed/
+COPY data/processed/ieee_investigation_context.parquet data/processed/
 
 EXPOSE 10000
 

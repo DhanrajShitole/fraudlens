@@ -58,6 +58,8 @@ import time
 import textwrap
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.dataset as ds
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -65,14 +67,33 @@ from sklearn.metrics.pairwise import cosine_similarity
 try:
     import ollama
 except ImportError:
-    raise SystemExit("ollama package not found — install it first (see module docstring).")
+    raise RuntimeError("ollama package not found — install it first (see module docstring).")
 
 BASE_DIR = os.path.abspath(os.path.join(os.getcwd(), ".."))
 if not os.path.isdir(os.path.join(BASE_DIR, "data")):
     BASE_DIR = os.getcwd()
 DATA_DIR = os.path.join(BASE_DIR, "data", "processed")
+_INVESTIGATION_COLUMNS = [
+    "TransactionID", "TransactionDT", "card1", "addr1",
+    "P_emaildomain", "TransactionAmt", "isFraud",
+]
 
-MODEL_NAME = "llama3.1:8b"
+MODEL_NAME = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+try:
+    OLLAMA_TIMEOUT_SECONDS = max(1.0, float(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")))
+except ValueError as exc:
+    raise RuntimeError("OLLAMA_TIMEOUT_SECONDS must be a positive number") from exc
+
+# Honor the provider's host setting and cap slow/unreachable requests. The
+# fallback to the module keeps the lightweight fake Ollama used by tests valid.
+OLLAMA_CLIENT = (
+    ollama.Client(
+        host=os.getenv("OLLAMA_HOST", "http://localhost:11434"),
+        timeout=OLLAMA_TIMEOUT_SECONDS,
+    )
+    if hasattr(ollama, "Client")
+    else ollama
+)
 
 REQUIRED_SECTIONS = [
     "ENTITY SUMMARY:",
@@ -95,11 +116,41 @@ VELOCITY_TXN_THRESHOLD = 5
 SECONDS_24H = 24 * 60 * 60
 SECONDS_30D = 30 * 24 * 60 * 60
 
-print("Loading transaction data for the agent's tools (this happens once)...")
-_train = pd.read_parquet(os.path.join(DATA_DIR, "ieee_train.parquet"))
-_val = pd.read_parquet(os.path.join(DATA_DIR, "ieee_val.parquet"))
-_all_txns = pd.concat([_train, _val], ignore_index=True)
-print(f"  Loaded {len(_all_txns):,} transactions for lookup.")
+def _open_datasets(data_dir: str):
+    """Open only Parquet metadata; do not materialize transaction rows.
+
+    The compact context artifact is built from train+validation rows but keeps
+    only fields used by the investigation tools. Local development can use the
+    original separate files, with training data optional.
+    """
+    def open_if_present(name: str):
+        path = os.path.join(data_dir, name)
+        return ds.dataset(path, format="parquet") if os.path.isfile(path) else None
+
+    validation = open_if_present("ieee_val_api.parquet") or open_if_present("ieee_val.parquet")
+    context = open_if_present("ieee_investigation_context.parquet")
+    if context is not None:
+        context_datasets = [context]
+        targets = [d for d in (validation, context) if d is not None]
+    else:
+        train = open_if_present("ieee_train.parquet")
+        context_datasets = [d for d in (train, validation) if d is not None]
+        targets = list(context_datasets)
+    return validation, context_datasets, targets
+
+
+_validation_dataset, _context_datasets, _target_datasets = _open_datasets(DATA_DIR)
+
+
+def _first_match(datasets, columns, expression):
+    for dataset in datasets:
+        available = set(dataset.schema.names)
+        if not set(columns).issubset(available):
+            continue
+        table = dataset.to_table(columns=columns, filter=expression)
+        if table.num_rows:
+            return table
+    return pa.table({name: [] for name in columns})
 
 _POLICY_CLAUSES = [
     {"id": "POL-001", "title": "Shared Card-Address Velocity",
@@ -141,10 +192,14 @@ def _entity_as_of(transaction_id: int):
     only rows with TransactionDT <= this transaction's TransactionDT, i.e.
     what a live system could have known when the transaction arrived.
     Returns (row, as_of_df, error_dict_or_None)."""
-    row = _all_txns[_all_txns["TransactionID"] == transaction_id]
-    if row.empty:
+    row_table = _first_match(
+        _target_datasets,
+        _INVESTIGATION_COLUMNS,
+        ds.field("TransactionID") == transaction_id,
+    )
+    if row_table.num_rows == 0:
         return None, None, {"error": f"TransactionID {transaction_id} not found."}
-    row = row.iloc[0]
+    row = row_table.slice(0, 1).to_pandas().iloc[0]
 
     card1, addr1 = row.get("card1"), row.get("addr1")
     if pd.isna(card1) or pd.isna(addr1):
@@ -153,9 +208,18 @@ def _entity_as_of(transaction_id: int):
             "note": "card1/addr1 missing for this transaction — limited entity history available.",
         }
 
-    entity = _all_txns[(_all_txns["card1"] == card1) & (_all_txns["addr1"] == addr1)]
-    if "TransactionDT" in entity.columns and pd.notna(row.get("TransactionDT")):
-        entity = entity[entity["TransactionDT"] <= row["TransactionDT"]]
+    entity_filter = (ds.field("card1") == card1) & (ds.field("addr1") == addr1)
+    if pd.notna(row.get("TransactionDT")):
+        entity_filter &= ds.field("TransactionDT") <= row["TransactionDT"]
+    entity_frames = []
+    for dataset in _context_datasets:
+        columns = [name for name in _INVESTIGATION_COLUMNS if name in dataset.schema.names]
+        if not {"card1", "addr1", "TransactionID", "TransactionAmt", "isFraud"}.issubset(columns):
+            continue
+        matches = dataset.to_table(columns=columns, filter=entity_filter)
+        if matches.num_rows:
+            entity_frames.append(matches.to_pandas())
+    entity = pd.concat(entity_frames, ignore_index=True) if entity_frames else pd.DataFrame(columns=_INVESTIGATION_COLUMNS)
     return row, entity, None
 
 
@@ -597,7 +661,7 @@ def _generate_narrative(tool_results: dict, verbose: bool, stats: dict, messages
     for attempt in range(2):  # first try + one retry, never more
         t = time.perf_counter()
         try:
-            response = ollama.chat(model=MODEL_NAME, messages=messages)
+            response = OLLAMA_CLIENT.chat(model=MODEL_NAME, messages=messages)
         except Exception as e:
             raise _LLMError(f"{type(e).__name__}: {str(e)[:200]}") from e
         finally:
@@ -677,11 +741,15 @@ def investigate(transaction_id: int, verbose: bool = True) -> str:
 
 
 if __name__ == "__main__":
-    fraud_rows = _val[_val["isFraud"] == 1]
-    if len(fraud_rows) == 0:
+    fraud_rows = _first_match(
+        _target_datasets,
+        _INVESTIGATION_COLUMNS,
+        ds.field("isFraud") == 1,
+    )
+    if fraud_rows.num_rows == 0:
         raise SystemExit("No fraud examples found in validation set to test with.")
 
-    sample_txn_id = int(fraud_rows.iloc[0]["TransactionID"])
+    sample_txn_id = int(fraud_rows.column("TransactionID")[0].as_py())
     print(f"\nTesting agent on a known fraud case: TransactionID {sample_txn_id}\n")
     print("=" * 70)
 

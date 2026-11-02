@@ -274,6 +274,31 @@ def _has_all_sections(text: str) -> bool:
 
 
 class TestInvestigate:
+    def test_validation_only_data_and_unavailable_ollama_still_build_case(self, tmp_agent_env, monkeypatch):
+        """Training Parquet is optional at runtime; Ollama-down fallback remains complete."""
+        agent, fake_ollama = tmp_agent_env
+        train_path = Path(agent.DATA_DIR) / "ieee_train.parquet"
+        train_path.unlink()
+
+        validation, context, targets = agent._open_datasets(agent.DATA_DIR)
+        monkeypatch.setattr(agent, "_validation_dataset", validation)
+        monkeypatch.setattr(agent, "_context_datasets", context)
+        monkeypatch.setattr(agent, "_target_datasets", targets)
+        assert validation is not None
+        assert len(context) == 1  # validation remains usable without training data
+
+        fake_ollama.raise_on_call = RuntimeError("Ollama is not reachable")
+        result = agent.investigate(9001, verbose=False)
+        assert _has_all_sections(result)
+        assert "language model was unavailable" in result
+
+    def test_invalid_transaction_returns_structured_missing_evidence(self, tmp_agent_env):
+        agent, fake_ollama = tmp_agent_env
+        result = agent.investigate(9999999999, verbose=False)
+        assert _has_all_sections(result)
+        assert "entity history could not be assembled" in result
+        assert fake_ollama.call_count == 0
+
     def test_valid_response_exactly_1_model_call_and_all_sections(self, tmp_agent_env):
         """
         Valid first response -> exactly 1 model call AND all 5 section labels present.

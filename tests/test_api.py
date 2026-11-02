@@ -152,9 +152,11 @@ class TestScoreEndpoint:
 
 class TestInvestigateEndpoint:
     def test_investigate_unknown_transaction_raises_404(self):
-        with pytest.raises(HTTPException) as exc_info:
-            app_module.investigate_transaction(_MISSING_TXN)
+        with patch.object(app_module, "_load_agent_investigator") as load_agent:
+            with pytest.raises(HTTPException) as exc_info:
+                app_module.investigate_transaction(_MISSING_TXN)
         assert exc_info.value.status_code == 404
+        load_agent.assert_not_called()
 
     def test_investigate_ollama_failure_raises_503(self):
         mock_investigate = MagicMock(side_effect=RuntimeError("Connection refused by Ollama"))
@@ -163,6 +165,18 @@ class TestInvestigateEndpoint:
                 app_module.investigate_transaction(_KNOWN_TXN)
             assert exc_info.value.status_code == 503
             assert "Ollama service may have crashed" in exc_info.value.detail
+
+    def test_investigate_agent_initialization_failure_raises_503(self):
+        with patch.object(
+            app_module,
+            "_load_agent_investigator",
+            side_effect=FileNotFoundError("ieee_train.parquet missing"),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                app_module.investigate_transaction(_KNOWN_TXN)
+        assert exc_info.value.status_code == 503
+        assert "could not initialize" in exc_info.value.detail
+        assert "ieee_train.parquet missing" in exc_info.value.detail
 
     def test_investigate_success_persists_case(self):
         mock_case_file = (

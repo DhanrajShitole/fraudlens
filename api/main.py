@@ -243,10 +243,17 @@ def investigate_transaction(transaction_id: int):
     score_result = _score_internal(transaction_id)
 
     try:
-        from agent import investigate as agent_investigate
-    except ImportError:
-        raise HTTPException(status_code=500,
-                             detail="Agent module not found — ensure src/agent.py exists and Ollama is running.")
+        agent_investigate = _load_agent_investigator()
+    except Exception as e:
+        # Importing agent can fail before Ollama is called (for example, when
+        # local-only training Parquet files are absent from a Render image).
+        # Surface this dependency/configuration problem as a useful 503 JSON.
+        raise HTTPException(
+            status_code=503,
+            detail=("Investigation agent could not initialize. Ensure src/agent.py, "
+                    "the transaction datasets, and the Ollama client are available. "
+                    f"Underlying error: {type(e).__name__}: {str(e)[:300]}"),
+        ) from e
 
     try:
         case_file_text = agent_investigate(transaction_id, verbose=False)
@@ -290,6 +297,12 @@ def investigate_transaction(transaction_id: int):
         case_file=case_file_text,
         case_id=case_id,
     )
+
+
+def _load_agent_investigator():
+    """Import the investigation module on demand so scoring stays independent."""
+    from agent import investigate as agent_investigate
+    return agent_investigate
 
 
 @app.get("/cases")

@@ -33,12 +33,13 @@ jobs:
       - name: Validate frontend HTML and Vercel configuration
         run: |
           test -f frontend/dashboard.html
+          test -f frontend/index.html
           test -f vercel.json
           python -m json.tool vercel.json > /dev/null
           python -c "
           from html.parser import HTMLParser
           class Validator(HTMLParser): pass
-          for path in ['frontend/dashboard.html']:
+          for path in ['frontend/dashboard.html', 'frontend/index.html']:
               with open(path, 'r', encoding='utf-8') as f:
                   Validator().feed(f.read())
               print(f'{path} syntax valid')

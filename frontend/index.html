@@ -1,509 +1,682 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-<meta http-equiv="Pragma" content="no-cache" />
-<meta http-equiv="Expires" content="0" />
-<title>FraudLens — Investigation Console</title>
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<style>
-  :root {
-    --bg: #10141a;
-    --panel: #171d26;
-    --panel-2: #1d2530;
-    --border: #2a3341;
-    --text: #e6e9ed;
-    --text-dim: #8b95a3;
-    --accent: #d4a24c;
-    --risk-high: #c0533e;
-    --risk-low: #4a9d6f;
-    --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
-    --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--sans);
-    -webkit-font-smoothing: antialiased;
-  }
-  #root { min-height: 100vh; }
-  .shell { display: grid; grid-template-columns: 320px 1fr; min-height: 100vh; }
-  @media (max-width: 860px) { .shell { grid-template-columns: 1fr; } }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>FraudLens — Investigation Console</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    :root {
+      --bg: #10141a;
+      --panel: #171d26;
+      --panel-2: #1d2530;
+      --border: #2a3341;
+      --text: #e6e9ed;
+      --text-dim: #8b95a3;
+      --accent: #d4a24c;
+      --risk-high: #c0533e;
+      --risk-low: #4a9d6f;
+      --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
+      --sans: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
 
-  .sidebar {
-    background: var(--panel);
-    border-right: 1px solid var(--border);
-    padding: 24px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-  }
-  .brand { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
-  .brand-title { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
-  .brand-sub { font-size: 13px; color: var(--text-dim); }
+    * {
+      box-sizing: border-box;
+    }
 
-  label { font-size: 12px; color: var(--text-dim); display: block; margin-bottom: 6px; }
-  input[type="text"], input[type="number"] {
-    width: 100%;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 10px 12px;
-    border-radius: 6px;
-    font-family: var(--mono);
-    font-size: 14px;
-  }
-  input:focus { outline: none; border-color: var(--accent); }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      -webkit-font-smoothing: antialiased;
+    }
 
-  .btn-row { display: flex; gap: 8px; }
-  button {
-    flex: 1;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 10px 14px;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
-  }
-  button:hover:not(:disabled) { background: #242e3d; border-color: #3b4759; }
-  button:disabled { opacity: 0.5; cursor: not-allowed; }
-  button.primary {
-    background: var(--accent);
-    color: #10141a;
-    border-color: var(--accent);
-    font-weight: 600;
-  }
-  button.primary:hover:not(:disabled) { background: #e0b05c; }
+    #root {
+      min-height: 100vh;
+    }
 
-  .divider { height: 1px; background: var(--border); margin: 4px 0; }
+    .shell {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: 100vh;
+    }
 
-  .history-item {
-    padding: 10px 12px;
-    border-radius: 6px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    margin-bottom: 8px;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-  .history-item:hover { border-color: var(--accent); }
-  .history-item .tid { font-family: var(--mono); font-size: 13px; font-weight: 600; }
-  .history-item .meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+    @media (max-width: 860px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+    }
 
-  .main { padding: 36px 40px; max-width: 960px; }
-  @media (max-width: 860px) { .main { padding: 24px 20px; } }
+    .sidebar {
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
 
-  .status-banner {
-    padding: 12px 16px;
-    border-radius: 8px;
-    font-size: 13px;
-    margin-bottom: 24px;
-  }
-  .status-banner.error {
-    background: rgba(192, 83, 62, 0.15);
-    border: 1px solid var(--risk-high);
-    color: #f28b77;
-  }
-  .status-banner.ok {
-    background: rgba(74, 157, 111, 0.15);
-    border: 1px solid var(--risk-low);
-    color: #72cca0;
-  }
-  .status-banner.warn {
-    background: rgba(212, 162, 76, 0.15);
-    border: 1px solid var(--accent);
-    color: #ebd19d;
-  }
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin-bottom: 8px;
+    }
 
-  .empty-state {
-    padding: 60px 20px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 14px;
-    border: 1px dashed var(--border);
-    border-radius: 10px;
-  }
+    .brand-title {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
 
-  .score-card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 24px;
-  }
-  .score-number { font-size: 56px; font-weight: 700; font-family: var(--mono); line-height: 1; }
-  .score-number.flagged { color: var(--risk-high); }
-  .score-number.clear { color: var(--risk-low); }
-  .score-label { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
-  .score-meta { display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--text-dim); }
-  .badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-    width: fit-content;
-  }
-  .badge.flagged { background: rgba(192,83,62,0.15); color: var(--risk-high); }
-  .badge.clear { background: rgba(74,157,111,0.15); color: var(--risk-low); }
+    .brand-sub {
+      font-size: 13px;
+      color: var(--text-dim);
+    }
 
-  .section-title { font-size: 13px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em; margin: 28px 0 12px; }
+    label {
+      font-size: 12px;
+      color: var(--text-dim);
+      display: block;
+      margin-bottom: 6px;
+    }
 
-  .reason-row { display: grid; grid-template-columns: 200px 1fr 80px; gap: 12px; align-items: center; margin-bottom: 8px; font-size: 13px; }
-  .reason-feature { font-family: var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .reason-bar-track { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
-  .reason-bar-fill { height: 100%; border-radius: 4px; }
-  .reason-bar-fill.pos { background: var(--risk-high); }
-  .reason-bar-fill.neg { background: var(--risk-low); }
-  .reason-value { font-family: var(--mono); text-align: right; color: var(--text-dim); }
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-family: var(--mono);
+      font-size: 14px;
+    }
 
-  .case-file {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 24px;
-    white-space: pre-wrap;
-    font-size: 14px;
-    line-height: 1.6;
-  }
-  .case-file .label-line { color: var(--accent); font-weight: 600; }
-  .loading-text { color: var(--text-dim); font-size: 13px; font-style: italic; }
-</style>
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .btn-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    button {
+      flex: 1;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    button:hover:not(:disabled) {
+      background: #242e3d;
+      border-color: #3b4759;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    button.primary {
+      background: var(--accent);
+      color: #10141a;
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+
+    button.primary:hover:not(:disabled) {
+      background: #e0b05c;
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+
+    .history-item {
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+
+    .history-item:hover {
+      border-color: var(--accent);
+    }
+
+    .history-item .tid {
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .history-item .meta {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
+
+    .main {
+      padding: 36px 40px;
+      max-width: 960px;
+    }
+
+    @media (max-width: 860px) {
+      .main {
+        padding: 24px 20px;
+      }
+    }
+
+    .status-banner {
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 24px;
+    }
+
+    .status-banner.error {
+      background: rgba(192, 83, 62, 0.15);
+      border: 1px solid var(--risk-high);
+      color: #f28b77;
+    }
+
+    .status-banner.ok {
+      background: rgba(74, 157, 111, 0.15);
+      border: 1px solid var(--risk-low);
+      color: #72cca0;
+    }
+
+    .status-banner.warn {
+      background: rgba(212, 162, 76, 0.15);
+      border: 1px solid var(--accent);
+      color: #ebd19d;
+    }
+
+    .empty-state {
+      padding: 60px 20px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 14px;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+    }
+
+    .score-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    .score-number {
+      font-size: 56px;
+      font-weight: 700;
+      font-family: var(--mono);
+      line-height: 1;
+    }
+
+    .score-number.flagged {
+      color: var(--risk-high);
+    }
+
+    .score-number.clear {
+      color: var(--risk-low);
+    }
+
+    .score-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 6px;
+    }
+
+    .score-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      width: fit-content;
+    }
+
+    .badge.flagged {
+      background: rgba(192, 83, 62, 0.15);
+      color: var(--risk-high);
+    }
+
+    .badge.clear {
+      background: rgba(74, 157, 111, 0.15);
+      color: var(--risk-low);
+    }
+
+    .section-title {
+      font-size: 13px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin: 28px 0 12px;
+    }
+
+    .reason-row {
+      display: grid;
+      grid-template-columns: 200px 1fr 80px;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+
+    .reason-feature {
+      font-family: var(--mono);
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .reason-bar-track {
+      height: 8px;
+      background: var(--panel-2);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .reason-bar-fill {
+      height: 100%;
+      border-radius: 4px;
+    }
+
+    .reason-bar-fill.pos {
+      background: var(--risk-high);
+    }
+
+    .reason-bar-fill.neg {
+      background: var(--risk-low);
+    }
+
+    .reason-value {
+      font-family: var(--mono);
+      text-align: right;
+      color: var(--text-dim);
+    }
+
+    .case-file {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+      white-space: pre-wrap;
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .case-file .label-line {
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .loading-text {
+      color: var(--text-dim);
+      font-size: 13px;
+      font-style: italic;
+    }
+  </style>
 </head>
+
 <body>
-<div id="root"></div>
+  <div id="root"></div>
 
-<script type="text/babel">
-const { useState, useEffect, useCallback } = React;
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
 
-const isLocal = typeof window !== "undefined" && (
-  window.location.hostname === "localhost" ||
-  window.location.hostname === "127.0.0.1" ||
-  window.location.protocol === "file:"
-);
-const API_BASE_DEFAULT = isLocal
-  ? "http://127.0.0.1:8000"
-  : "https://fraudlens-api-54c8.onrender.com";
+    const isLocal = typeof window !== "undefined" && (
+      window.location.hostname === "localhost" ||
+      window.location.hostname === "127.0.0.1" ||
+      window.location.protocol === "file:"
+    );
+    const API_BASE_DEFAULT = isLocal
+      ? "http://127.0.0.1:8000"
+      : "https://fraudlens-api-54c8.onrender.com";
 
-function ScoreCard({ score }) {
-  const flagged = score.flagged;
-  return (
-    <div className="score-card">
-      <div>
-        <div className={`score-number ${flagged ? "flagged" : "clear"}`}>
-          {(score.risk_score * 100).toFixed(1)}%
-        </div>
-        <div className="score-label">risk score</div>
-      </div>
-      <div className="score-meta">
-        <span className={`badge ${flagged ? "flagged" : "clear"}`}>
-          {flagged ? "FLAGGED FOR REVIEW" : "BELOW THRESHOLD"}
-        </span>
-        <div>Threshold (2% FP budget): <span style={{ fontFamily: "var(--mono)" }}>{score.threshold_used}</span></div>
-        <div>TransactionID: <span style={{ fontFamily: "var(--mono)" }}>{score.transaction_id}</span></div>
-      </div>
-    </div>
-  );
-}
-
-function ReasonCodes({ reasons }) {
-  if (!reasons || reasons.length === 0) return null;
-  const maxAbs = Math.max(...reasons.map(r => Math.abs(r.shap_contribution)), 0.0001);
-  return (
-    <div>
-      <div className="section-title">Top Reason Codes (SHAP)</div>
-      {reasons.map((r, i) => {
-        const pct = (Math.abs(r.shap_contribution) / maxAbs) * 100;
-        const positive = r.shap_contribution >= 0;
-        return (
-          <div className="reason-row" key={i}>
-            <div className="reason-feature" title={r.feature}>{r.feature}</div>
-            <div className="reason-bar-track">
-              <div
-                className={`reason-bar-fill ${positive ? "pos" : "neg"}`}
-                style={{ width: `${pct}%` }}
-              />
-            </div>
-            <div className="reason-value">{r.shap_contribution.toFixed(4)}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function CaseFile({ text }) {
-  if (!text) return null;
-  const labels = ["ENTITY SUMMARY:", "TOP RISK FACTORS:", "RELATED ENTITY SIGNAL:", "RELEVANT POLICY:", "RECOMMENDED ACTION:"];
-  const lines = text.split("\n").map((line, i) => {
-    const match = labels.find(l => line.trim().startsWith(l));
-    if (match) {
+    function ScoreCard({ score }) {
+      const flagged = score.flagged;
       return (
-        <div key={i}>
-          <span className="label-line">{match}</span>{line.trim().slice(match.length)}
+        <div className="score-card">
+          <div>
+            <div className={`score-number ${flagged ? "flagged" : "clear"}`}>
+              {(score.risk_score * 100).toFixed(1)}%
+            </div>
+            <div className="score-label">risk score</div>
+          </div>
+          <div className="score-meta">
+            <span className={`badge ${flagged ? "flagged" : "clear"}`}>
+              {flagged ? "FLAGGED FOR REVIEW" : "BELOW THRESHOLD"}
+            </span>
+            <div>Threshold (2% FP budget): <span style={{ fontFamily: "var(--mono)" }}>{score.threshold_used}</span></div>
+            <div>TransactionID: <span style={{ fontFamily: "var(--mono)" }}>{score.transaction_id}</span></div>
+          </div>
         </div>
       );
     }
-    return <div key={i}>{line}</div>;
-  });
-  return (
-    <div>
-      <div className="section-title">Case File</div>
-      <div className="case-file">{lines}</div>
-    </div>
-  );
-}
 
-function App() {
-  const [apiBase, setApiBase] = useState(API_BASE_DEFAULT);
-  const [txnId, setTxnId] = useState("");
-  const [apiStatus, setApiStatus] = useState("connecting"); // 'connecting' | 'ok' | 'error'
-  const [score, setScore] = useState(null);
-  const [caseFile, setCaseFile] = useState(null);
-  const [history, setHistory] = useState([]);
-  const [loading, setLoading] = useState(null); // null | 'score' | 'investigate'
-  const [errorMsg, setErrorMsg] = useState(null);
-
-  const loadHistory = useCallback(async (base) => {
-    try {
-      const res = await fetch(`${base || apiBase}/cases?limit=15`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setHistory(data);
-    } catch (e) { /* silent */ }
-  }, [apiBase]);
-
-  const checkHealth = useCallback(async (targetBase) => {
-    const base = targetBase || apiBase;
-    try {
-      const res = await fetch(`${base}/health`);
-      if (!res.ok) throw new Error("bad response");
-      setApiStatus("ok");
-      loadHistory(base);
-    } catch (e) {
-      setApiStatus("error");
+    function ReasonCodes({ reasons }) {
+      if (!reasons || reasons.length === 0) return null;
+      const maxAbs = Math.max(...reasons.map(r => Math.abs(r.shap_contribution)), 0.0001);
+      return (
+        <div>
+          <div className="section-title">Top Reason Codes (SHAP)</div>
+          {reasons.map((r, i) => {
+            const pct = (Math.abs(r.shap_contribution) / maxAbs) * 100;
+            const positive = r.shap_contribution >= 0;
+            return (
+              <div className="reason-row" key={i}>
+                <div className="reason-feature" title={r.feature}>{r.feature}</div>
+                <div className="reason-bar-track">
+                  <div
+                    className={`reason-bar-fill ${positive ? "pos" : "neg"}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <div className="reason-value">{r.shap_contribution.toFixed(4)}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
     }
-  }, [apiBase, loadHistory]);
 
-  useEffect(() => {
-    checkHealth(apiBase);
-    // Auto-poll every 3.5 seconds if connecting or error (automatically connects when Render wakes up)
-    const interval = setInterval(() => {
-      setApiStatus(curr => {
-        if (curr !== "ok") {
-          checkHealth(apiBase);
+    function CaseFile({ text }) {
+      if (!text) return null;
+      const labels = ["ENTITY SUMMARY:", "TOP RISK FACTORS:", "RELATED ENTITY SIGNAL:", "RELEVANT POLICY:", "RECOMMENDED ACTION:"];
+      const lines = text.split("\n").map((line, i) => {
+        const match = labels.find(l => line.trim().startsWith(l));
+        if (match) {
+          return (
+            <div key={i}>
+              <span className="label-line">{match}</span>{line.trim().slice(match.length)}
+            </div>
+          );
         }
-        return curr;
+        return <div key={i}>{line}</div>;
       });
-    }, 3500);
-    return () => clearInterval(interval);
-  }, [apiBase, checkHealth]);
-
-  const handleScore = async () => {
-    if (!txnId) return;
-    setLoading("score");
-    setErrorMsg(null);
-    setCaseFile(null);
-    try {
-      const res = await fetch(`${apiBase}/score/${txnId}`, { method: "POST" });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.detail || `Request failed (${res.status})`);
-      }
-      const data = await res.json();
-      setScore(data);
-    } catch (e) {
-      setErrorMsg(e.message);
-      setScore(null);
-    } finally {
-      setLoading(null);
+      return (
+        <div>
+          <div className="section-title">Case File</div>
+          <div className="case-file">{lines}</div>
+        </div>
+      );
     }
-  };
 
-  const handleInvestigate = async () => {
-    if (!txnId) return;
-    setLoading("investigate");
-    setErrorMsg(null);
-    try {
-      const res = await fetch(`${apiBase}/investigate/${txnId}`, { method: "POST" });
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.detail || `Request failed (${res.status})`);
-      }
-      const data = await res.json();
-      setScore({
-        transaction_id: data.transaction_id,
-        risk_score: data.risk_score,
-        flagged: data.flagged,
-        threshold_used: data.threshold_used,
-        top_reason_codes: data.top_reason_codes,
-      });
-      setCaseFile(data.case_file);
-      loadHistory(apiBase);
-    } catch (e) {
-      setErrorMsg(e.message);
-    } finally {
-      setLoading(null);
-    }
-  };
+    function App() {
+      const [apiBase, setApiBase] = useState(API_BASE_DEFAULT);
+      const [txnId, setTxnId] = useState("");
+      const [apiStatus, setApiStatus] = useState("connecting"); // 'connecting' | 'ok' | 'error'
+      const [score, setScore] = useState(null);
+      const [caseFile, setCaseFile] = useState(null);
+      const [history, setHistory] = useState([]);
+      const [loading, setLoading] = useState(null); // null | 'score' | 'investigate'
+      const [errorMsg, setErrorMsg] = useState(null);
 
-  const openCase = async (caseId) => {
-    try {
-      const res = await fetch(`${apiBase}/cases/${caseId}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setErrorMsg(null);
-      setTxnId(String(data.transaction_id));
-      setScore({
-        transaction_id: data.transaction_id,
-        risk_score: data.risk_score,
-        flagged: data.flagged,
-        threshold_used: data.threshold_used,
-        top_reason_codes: data.top_reason_codes,
-      });
-      setCaseFile(data.case_file);
-    } catch (e) { /* ignore */ }
-  };
+      const loadHistory = useCallback(async (base) => {
+        try {
+          const res = await fetch(`${base || apiBase}/cases?limit=15`);
+          if (!res.ok) return;
+          const data = await res.json();
+          setHistory(data);
+        } catch (e) { /* silent */ }
+      }, [apiBase]);
 
-  const switchApi = (newBase) => {
-    setApiBase(newBase);
-    setApiStatus("connecting");
-    checkHealth(newBase);
-  };
+      const checkHealth = useCallback(async (targetBase) => {
+        const base = targetBase || apiBase;
+        try {
+          const res = await fetch(`${base}/health`);
+          if (!res.ok) throw new Error("bad response");
+          setApiStatus("ok");
+          loadHistory(base);
+        } catch (e) {
+          setApiStatus("error");
+        }
+      }, [apiBase, loadHistory]);
 
-  return (
-    <div className="shell">
-      <div className="sidebar">
-        <div className="brand">
-          <div className="brand-title">FraudLens</div>
-          <div className="brand-sub">Investigation Console v2.0</div>
-        </div>
+      useEffect(() => {
+        checkHealth(apiBase);
+        // Auto-poll every 3.5 seconds if connecting or error (automatically connects when Render wakes up)
+        const interval = setInterval(() => {
+          setApiStatus(curr => {
+            if (curr !== "ok") {
+              checkHealth(apiBase);
+            }
+            return curr;
+          });
+        }, 3500);
+        return () => clearInterval(interval);
+      }, [apiBase, checkHealth]);
 
-        <div>
-          <label>API endpoint</label>
-          <input type="text" value={apiBase} onChange={e => { setApiBase(e.target.value); setApiStatus("connecting"); }} />
-          <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
-            <button
-              type="button"
-              style={{
-                flex: 1, padding: "5px 6px", fontSize: "11px",
-                background: apiBase.includes("127.0.0.1") || apiBase.includes("localhost") ? "var(--panel-2)" : "transparent",
-                border: "1px solid var(--border)", color: "var(--text-dim)", borderRadius: "4px", cursor: "pointer"
-              }}
-              onClick={() => switchApi("http://127.0.0.1:8000")}
-            >
-              Local (8000)
-            </button>
-            <button
-              type="button"
-              style={{
-                flex: 1, padding: "5px 6px", fontSize: "11px",
-                background: apiBase.includes("onrender.com") ? "var(--panel-2)" : "transparent",
-                border: "1px solid var(--border)", color: "var(--text-dim)", borderRadius: "4px", cursor: "pointer"
-              }}
-              onClick={() => switchApi("https://fraudlens-api-54c8.onrender.com")}
-            >
-              Render Cloud
-            </button>
-          </div>
-        </div>
+      const handleScore = async () => {
+        if (!txnId) return;
+        setLoading("score");
+        setErrorMsg(null);
+        setCaseFile(null);
+        try {
+          const res = await fetch(`${apiBase}/score/${txnId}`, { method: "POST" });
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}));
+            throw new Error(detail.detail || `Request failed (${res.status})`);
+          }
+          const data = await res.json();
+          setScore(data);
+        } catch (e) {
+          setErrorMsg(e.message);
+          setScore(null);
+        } finally {
+          setLoading(null);
+        }
+      };
 
-        <div>
-          <label>Transaction ID</label>
-          <input
-            type="text"
-            placeholder="e.g. 3400379"
-            value={txnId}
-            onChange={e => setTxnId(e.target.value.replace(/[^0-9]/g, ""))}
-            onKeyDown={e => { if (e.key === "Enter" && txnId && !loading) handleScore(); }}
-          />
-        </div>
+      const handleInvestigate = async () => {
+        if (!txnId) return;
+        setLoading("investigate");
+        setErrorMsg(null);
+        try {
+          const res = await fetch(`${apiBase}/investigate/${txnId}`, { method: "POST" });
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}));
+            throw new Error(detail.detail || `Request failed (${res.status})`);
+          }
+          const data = await res.json();
+          setScore({
+            transaction_id: data.transaction_id,
+            risk_score: data.risk_score,
+            flagged: data.flagged,
+            threshold_used: data.threshold_used,
+            top_reason_codes: data.top_reason_codes,
+          });
+          setCaseFile(data.case_file);
+          loadHistory(apiBase);
+        } catch (e) {
+          setErrorMsg(e.message);
+        } finally {
+          setLoading(null);
+        }
+      };
 
-        <div className="btn-row">
-          <button onClick={handleScore} disabled={!txnId || loading}>
-            {loading === "score" ? "Scoring…" : "Get Score"}
-          </button>
-        </div>
-        <div className="btn-row">
-          <button className="primary" onClick={handleInvestigate} disabled={!txnId || loading}>
-            {loading === "investigate" ? "Investigating…" : "Investigate"}
-          </button>
-        </div>
+      const openCase = async (caseId) => {
+        try {
+          const res = await fetch(`${apiBase}/cases/${caseId}`);
+          if (!res.ok) return;
+          const data = await res.json();
+          setErrorMsg(null);
+          setTxnId(String(data.transaction_id));
+          setScore({
+            transaction_id: data.transaction_id,
+            risk_score: data.risk_score,
+            flagged: data.flagged,
+            threshold_used: data.threshold_used,
+            top_reason_codes: data.top_reason_codes,
+          });
+          setCaseFile(data.case_file);
+        } catch (e) { /* ignore */ }
+      };
 
-        <div className="divider" />
+      const switchApi = (newBase) => {
+        setApiBase(newBase);
+        setApiStatus("connecting");
+        checkHealth(newBase);
+      };
 
-        <div>
-          <label>Recent investigations</label>
-          {history.length === 0 && <div className="loading-text">None yet.</div>}
-          {history.map(h => (
-            <div className="history-item" key={h.id} onClick={() => openCase(h.id)}>
-              <div className="tid">TXN {h.transaction_id}</div>
-              <div className="meta">
-                risk {(h.risk_score * 100).toFixed(1)}% · {new Date(h.created_at).toLocaleString()}
+      return (
+        <div className="shell">
+          <div className="sidebar">
+            <div className="brand">
+              <div className="brand-title">F</div>
+              <div className="brand-sub">Investigation Console</div>
+            </div>
+
+            <div>
+              <label>API endpoint</label>
+              <input type="text" value={apiBase} onChange={e => { setApiBase(e.target.value); setApiStatus("connecting"); }} />
+              <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
+                <button
+                  type="button"
+                  style={{
+                    flex: 1, padding: "5px 6px", fontSize: "11px",
+                    background: apiBase.includes("127.0.0.1") || apiBase.includes("localhost") ? "var(--panel-2)" : "transparent",
+                    border: "1px solid var(--border)", color: "var(--text-dim)", borderRadius: "4px", cursor: "pointer"
+                  }}
+                  onClick={() => switchApi("http://127.0.0.1:8000")}
+                >
+                  Local (8000)
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    flex: 1, padding: "5px 6px", fontSize: "11px",
+                    background: apiBase.includes("onrender.com") ? "var(--panel-2)" : "transparent",
+                    border: "1px solid var(--border)", color: "var(--text-dim)", borderRadius: "4px", cursor: "pointer"
+                  }}
+                  onClick={() => switchApi("https://fraudlens-api-54c8.onrender.com")}
+                >
+                  Render Cloud
+                </button>
               </div>
             </div>
-          ))}
+
+            <div>
+              <label>Transaction ID</label>
+              <input
+                type="text"
+                placeholder="e.g. 3400379"
+                value={txnId}
+                onChange={e => setTxnId(e.target.value.replace(/[^0-9]/g, ""))}
+                onKeyDown={e => { if (e.key === "Enter" && txnId && !loading) handleScore(); }}
+              />
+            </div>
+
+            <div className="btn-row">
+              <button onClick={handleScore} disabled={!txnId || loading}>
+                {loading === "score" ? "Scoring…" : "Get Score"}
+              </button>
+            </div>
+            <div className="btn-row">
+              <button className="primary" onClick={handleInvestigate} disabled={!txnId || loading}>
+                {loading === "investigate" ? "Investigating…" : "Investigate"}
+              </button>
+            </div>
+
+            <div className="divider" />
+
+            <div>
+              <label>Recent investigations</label>
+              {history.length === 0 && <div className="loading-text">None yet.</div>}
+              {history.map(h => (
+                <div className="history-item" key={h.id} onClick={() => openCase(h.id)}>
+                  <div className="tid">TXN {h.transaction_id}</div>
+                  <div className="meta">
+                    risk {(h.risk_score * 100).toFixed(1)}% · {new Date(h.created_at).toLocaleString()}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="main">
+            {apiStatus === "connecting" && !score && (
+              <div className="status-banner warn">
+                Connecting to FraudLens API at <strong>{apiBase}</strong>... (Render cloud server may take a moment to wake up)
+              </div>
+            )}
+            {apiStatus === "error" && (
+              <div className="status-banner error" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
+                <span>
+                  Can't reach API at <strong>{apiBase}</strong>. If Render is asleep, waking up takes ~20s. Retrying automatically...
+                </span>
+                <button
+                  type="button"
+                  style={{
+                    flex: "none", padding: "4px 10px", fontSize: "12px",
+                    background: "var(--panel)", border: "1px solid var(--border)",
+                    color: "var(--text)", borderRadius: "4px", cursor: "pointer"
+                  }}
+                  onClick={() => checkHealth()}
+                >
+                  Retry Now
+                </button>
+              </div>
+            )}
+            {apiStatus === "ok" && !score && (
+              <div className="status-banner ok">
+                Connected to FraudLens API ({apiBase.includes("onrender.com") ? "Render Cloud" : "Local Server"}).
+              </div>
+            )}
+            {errorMsg && <div className="status-banner error">{errorMsg}</div>}
+
+            {!score && !errorMsg && (
+              <div className="empty-state">
+                Enter a TransactionID on the left, then Get Score or Investigate to begin.
+              </div>
+            )}
+
+            {score && <ScoreCard score={score} />}
+            {score && <ReasonCodes reasons={score.top_reason_codes} />}
+            {caseFile && <CaseFile text={caseFile} />}
+          </div>
         </div>
-      </div>
+      );
+    }
 
-      <div className="main">
-        {apiStatus === "connecting" && !score && (
-          <div className="status-banner warn">
-            Connecting to FraudLens API at <strong>{apiBase}</strong>... (Render cloud server may take a moment to wake up)
-          </div>
-        )}
-        {apiStatus === "error" && (
-          <div className="status-banner error" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" }}>
-            <span>
-              Can't reach API at <strong>{apiBase}</strong>. If Render is asleep, waking up takes ~20s. Retrying automatically...
-            </span>
-            <button
-              type="button"
-              style={{
-                flex: "none", padding: "4px 10px", fontSize: "12px",
-                background: "var(--panel)", border: "1px solid var(--border)",
-                color: "var(--text)", borderRadius: "4px", cursor: "pointer"
-              }}
-              onClick={() => checkHealth()}
-            >
-              Retry Now
-            </button>
-          </div>
-        )}
-        {apiStatus === "ok" && !score && (
-          <div className="status-banner ok">
-            Connected to FraudLens API ({apiBase.includes("onrender.com") ? "Render Cloud" : "Local Server"}).
-          </div>
-        )}
-        {errorMsg && <div className="status-banner error">{errorMsg}</div>}
-
-        {!score && !errorMsg && (
-          <div className="empty-state">
-            Enter a TransactionID on the left, then Get Score or Investigate to begin.
-          </div>
-        )}
-
-        {score && <ScoreCard score={score} />}
-        {score && <ReasonCodes reasons={score.top_reason_codes} />}
-        {caseFile && <CaseFile text={caseFile} />}
-      </div>
-    </div>
-  );
-}
-
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-</script>
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
 </body>
-</html>
+
+</html>

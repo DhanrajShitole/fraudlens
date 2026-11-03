@@ -5,7 +5,8 @@
   "outputDirectory": "frontend",
   "cleanUrls": true,
   "rewrites": [
-    { "source": "/", "destination": "/index.html" },
+    { "source": "/", "destination": "/dashboard.html" },
+    { "source": "/index.html", "destination": "/dashboard.html" },
     { "source": "/dashboard", "destination": "/dashboard.html" }
   ]
 }

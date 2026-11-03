@@ -4,12 +4,9 @@
   "installCommand": "",
   "outputDirectory": "frontend",
   "cleanUrls": true,
-  "redirects": [
-    { "source": "/", "destination": "/dashboard", "permanent": false }
-  ],
   "rewrites": [
-    { "source": "/dashboard", "destination": "/dashboard.html" },
-    { "source": "/index", "destination": "/dashboard.html" }
+    { "source": "/", "destination": "/dashboard.html" },
+    { "source": "/dashboard", "destination": "/dashboard.html" }
   ]
 }
 

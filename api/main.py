@@ -1,331 +1,340 @@
-"""
-api/main.py
-
-Phase 7 — FastAPI backend for FraudLens.
-
-Endpoints:
-    GET  /health                          — service status check
-    POST /score/{transaction_id}          — real-time fraud risk score + SHAP reason codes
-    POST /investigate/{transaction_id}    — triggers the agent to draft a case file
-    GET  /cases                           — list past investigations (SQLite-backed log)
-    GET  /cases/{case_id}                 — retrieve one past investigation
-
-Data note: this demo API scores transactions that already exist in the
-processed validation set (data/processed/ieee_val_api.parquet), simulating
-what a real-time feed would look like. A production version would accept
-raw transaction fields in the POST body instead of a lookup ID — this is
-a deliberate simplification appropriate for a final-year project without
-a live transaction stream, documented here rather than hidden.
-
-Run with (from the FraudLens root):
-    C:\\...\\Python313\\python.exe -m uvicorn api.main:app --reload
-
-Required packages:
-    C:\\...\\Python313\\python.exe -m pip install fastapi uvicorn
-(joblib, shap, pandas, lightgbm should already be installed from earlier phases)
-"""
-
-import os
-import sys
-import json
-import sqlite3
-from datetime import datetime, timezone
-from contextlib import asynccontextmanager
-
-import joblib
-import numpy as np
-import pyarrow.dataset as ds
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DATA_DIR = os.path.join(BASE_DIR, "data", "processed")
-MODELS_DIR = os.path.join(BASE_DIR, "models")
-DB_PATH = os.path.join(BASE_DIR, "cases.db")
-
-# agent.py lives in src/, a sibling folder of api/ (this file's folder) —
-# add it to the path so we can import it regardless of where uvicorn is launched from.
-SRC_DIR = os.path.join(BASE_DIR, "src")
-if SRC_DIR not in sys.path:
-    sys.path.insert(0, SRC_DIR)
-
-_state = {}
-
-
-def _init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS cases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_id INTEGER NOT NULL,
-            risk_score REAL,
-            threshold_used REAL,
-            flagged INTEGER,
-            top_reason_codes TEXT,
-            case_file TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("Loading FraudLens model...")
-
-    # Load the local trained model directly.
-    model_path = os.path.join(
-        MODELS_DIR,
-        "ieee_lightgbm_tuned.joblib"
-    )
-
-    _state["model"] = joblib.load(model_path)
-    _state["model_source"] = "joblib"
-
-    # Load model metadata.
-    metadata_path = os.path.join(
-        MODELS_DIR,
-        "ieee_lightgbm_tuned_metadata.json"
-    )
-
-    with open(metadata_path, encoding="utf-8") as f:
-        _state["metadata"] = json.load(f)
-
-    # Keep the validation dataset on disk. Loading every validation row
-    # into pandas is unnecessary for an API that looks up one transaction at
-    # a time. Arrow scans only the matching row group and requested columns.
-    val_path = os.path.join(
-        DATA_DIR,
-        "ieee_val_api.parquet"
-    )
-    _state["val_dataset"] = ds.dataset(val_path, format="parquet")
-
-    # SHAP is optional to reduce startup memory consumption.
-    _state["shap_explainer"] = None
-
-    enable_shap = os.getenv("ENABLE_SHAP", "false").lower() == "true"
-
-    if enable_shap:
-        try:
-            import shap
-            _state["shap_explainer"] = shap.TreeExplainer(
-                _state["model"]
-            )
-            print("SHAP explainability enabled.")
-        except Exception as exc:
-            print(f"WARNING: SHAP initialization failed: {exc}")
-
-    _init_db()
-
-    print(
-        f"Startup complete. "
-        f"model_source={_state['model_source']}, "
-        "validation_data=lazy"
-    )
-
-    yield
-
-    print("Shutting down.")
-
-
-app = FastAPI(title="FraudLens API", version="0.1.0", lifespan=lifespan)
-
-# Allow the dashboard (opened as a local file:// page, or served from any local
-# dev port) to call this API from the browser. Wide open ("*") is appropriate
-# here since this is a local-only dev tool with no real user auth yet — this
-# would need to be locked down to specific origins before any real deployment.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-class ScoreResponse(BaseModel):
-    transaction_id: int
-    risk_score: float
-    flagged: bool
-    threshold_used: float
-    top_reason_codes: list[dict]
-
-
-class InvestigateResponse(BaseModel):
-    transaction_id: int
-    risk_score: float
-    flagged: bool
-    threshold_used: float
-    top_reason_codes: list[dict]
-    case_file: str
-    case_id: int
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "model_loaded": "model" in _state,
-        "model_type": _state.get("metadata", {}).get("model_type", "unknown"),
-        "model_source": _state.get("model_source", "unknown"),
-    }
-
-
-def _score_internal(transaction_id: int) -> ScoreResponse:
-    """Core scoring logic, shared by /score and /investigate so both always
-    agree on the risk score, threshold, and reason codes for a transaction —
-    avoids the two endpoints ever disagreeing or one having stale/missing data."""
-    feats = _state["metadata"]["feature_columns"]
-    threshold = _state["metadata"]["threshold_2pct_fp_budget"]
-
-    # ``val_data`` remains supported for callers/tests that inject an in-memory
-    # fixture. Production uses a filtered Arrow scan and materializes only one
-    # transaction's feature values.
-    if "val_data" in _state:
-        matches = _state["val_data"][_state["val_data"]["TransactionID"] == transaction_id]
-        if matches.empty:
-            raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
-        row = matches[feats]
-    else:
-        dataset = _state["val_dataset"]
-        columns = list(dict.fromkeys(["TransactionID"] + feats))
-        table = dataset.to_table(
-            columns=columns,
-            filter=ds.field("TransactionID") == transaction_id,
-        )
-        if table.num_rows == 0:
-            raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
-        # Preserve the trained estimator's DataFrame feature names and order.
-        import pandas as pd
-        row = table.select(feats).to_pandas()
-
-    if len(row) == 0:
-        raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
-
-    X = row.fillna(-999)
-    risk_score = float(_state["model"].predict_proba(X)[:, 1][0])
-
-    top_reasons = []
-    if _state["shap_explainer"] is not None:
-        shap_values = _state["shap_explainer"].shap_values(X)
-        if isinstance(shap_values, list):
-            shap_values = shap_values[1]
-        contributions = shap_values[0]
-        top_idx = np.argsort(np.abs(contributions))[::-1][:5]
-        for i in top_idx:
-            top_reasons.append({
-                "feature": feats[i],
-                "value": float(X.iat[0, i]),
-                "shap_contribution": round(float(contributions[i]), 5),
-            })
-
-    return ScoreResponse(
-        transaction_id=transaction_id,
-        risk_score=round(risk_score, 5),
-        flagged=risk_score >= threshold,
-        threshold_used=round(threshold, 5),
-        top_reason_codes=top_reasons,
-    )
-
-
-@app.post("/score/{transaction_id}", response_model=ScoreResponse)
-def score_transaction(transaction_id: int):
-    return _score_internal(transaction_id)
-
-
-@app.post("/investigate/{transaction_id}", response_model=InvestigateResponse)
-def investigate_transaction(transaction_id: int):
-    # Reuse the exact same scoring logic first, so the case file — and the
-    # dashboard's flagged badge — always reflect the real threshold, never a
-    # stale or missing one from a separate earlier call.
-    score_result = _score_internal(transaction_id)
-
-    try:
-        agent_investigate = _load_agent_investigator()
-    except Exception as e:
-        # Importing agent can fail before Ollama is called (for example, when
-        # local-only training Parquet files are absent from a Render image).
-        # Surface this dependency/configuration problem as a useful 503 JSON.
-        raise HTTPException(
-            status_code=503,
-            detail=("Investigation agent could not initialize. Ensure src/agent.py, "
-                    "the transaction datasets, and the Ollama client are available. "
-                    f"Underlying error: {type(e).__name__}: {str(e)[:300]}"),
-        ) from e
-
-    try:
-        case_file_text = agent_investigate(transaction_id, verbose=False)
-    except Exception as e:
-        # Most commonly: the local Ollama service crashed or isn't running.
-        # Returning a proper HTTPException (rather than letting the raw
-        # exception propagate) ensures FastAPI still applies CORS headers
-        # to the error response — otherwise the browser reports a generic
-        # "Failed to fetch" instead of showing this actual message.
-        raise HTTPException(
-            status_code=503,
-            detail=f"Agent investigation failed — the local Ollama service may have crashed or isn't running. "
-                   f"Try 'ollama run llama3.1:8b' in a terminal to check it responds, then retry. "
-                   f"Underlying error: {e}"
-        )
-
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute(
-        "INSERT INTO cases (transaction_id, risk_score, threshold_used, flagged, top_reason_codes, case_file, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            transaction_id,
-            score_result.risk_score,
-            score_result.threshold_used,
-            int(score_result.flagged),
-            json.dumps(score_result.top_reason_codes),
-            case_file_text,
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    case_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    return InvestigateResponse(
-        transaction_id=transaction_id,
-        risk_score=score_result.risk_score,
-        flagged=score_result.flagged,
-        threshold_used=score_result.threshold_used,
-        top_reason_codes=score_result.top_reason_codes,
-        case_file=case_file_text,
-        case_id=case_id,
-    )
-
-
-def _load_agent_investigator():
-    """Import the investigation module on demand so scoring stays independent."""
-    from agent import investigate as agent_investigate
-    return agent_investigate
-
-
-@app.get("/cases")
-def list_cases(limit: int = 20):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT id, transaction_id, risk_score, created_at FROM cases ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-@app.get("/cases/{case_id}")
-def get_case(case_id: int):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
-    conn.close()
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"Case {case_id} not found.")
-    result = dict(row)
-    result["flagged"] = bool(result["flagged"])
-    result["top_reason_codes"] = json.loads(result["top_reason_codes"]) if result["top_reason_codes"] else []
-    return result
+"""
+api/main.py
+
+Phase 7 — FastAPI backend for FraudLens.
+
+Endpoints:
+    GET  /health                          — service status check
+    POST /score/{transaction_id}          — real-time fraud risk score + SHAP reason codes
+    POST /investigate/{transaction_id}    — triggers the agent to draft a case file
+    GET  /cases                           — list past investigations (SQLite-backed log)
+    GET  /cases/{case_id}                 — retrieve one past investigation
+
+Data note: this demo API scores transactions that already exist in the
+processed validation set (data/processed/ieee_val_api.parquet), simulating
+what a real-time feed would look like. A production version would accept
+raw transaction fields in the POST body instead of a lookup ID — this is
+a deliberate simplification appropriate for a final-year project without
+a live transaction stream, documented here rather than hidden.
+
+Run with (from the FraudLens root):
+    C:\\...\\Python313\\python.exe -m uvicorn api.main:app --reload
+
+Required packages:
+    C:\\...\\Python313\\python.exe -m pip install fastapi uvicorn
+(joblib, shap, pandas, lightgbm should already be installed from earlier phases)
+"""
+
+import os
+import sys
+import json
+import sqlite3
+from datetime import datetime, timezone
+from contextlib import asynccontextmanager
+
+import joblib
+import numpy as np
+import pyarrow.dataset as ds
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+DATA_DIR = os.path.join(BASE_DIR, "data", "processed")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+DB_PATH = os.path.join(BASE_DIR, "cases.db")
+
+# agent.py lives in src/, a sibling folder of api/ (this file's folder) —
+# add it to the path so we can import it regardless of where uvicorn is launched from.
+SRC_DIR = os.path.join(BASE_DIR, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+
+_state = {}
+
+
+def _init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER NOT NULL,
+            risk_score REAL,
+            threshold_used REAL,
+            flagged INTEGER,
+            top_reason_codes TEXT,
+            case_file TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Loading FraudLens model...")
+
+    # Load the local trained model directly.
+    model_path = os.path.join(
+        MODELS_DIR,
+        "ieee_lightgbm_tuned.joblib"
+    )
+
+    _state["model"] = joblib.load(model_path)
+    _state["model_source"] = "joblib"
+
+    # Load model metadata.
+    metadata_path = os.path.join(
+        MODELS_DIR,
+        "ieee_lightgbm_tuned_metadata.json"
+    )
+
+    with open(metadata_path, encoding="utf-8") as f:
+        _state["metadata"] = json.load(f)
+
+    # Keep the validation dataset on disk. Loading every validation row
+    # into pandas is unnecessary for an API that looks up one transaction at
+    # a time. Arrow scans only the matching row group and requested columns.
+    val_path = os.path.join(
+        DATA_DIR,
+        "ieee_val_api.parquet"
+    )
+    _state["val_dataset"] = ds.dataset(val_path, format="parquet")
+
+    # SHAP is optional to reduce startup memory consumption.
+    _state["shap_explainer"] = None
+
+    enable_shap = os.getenv("ENABLE_SHAP", "false").lower() == "true"
+
+    if enable_shap:
+        try:
+            import shap
+            _state["shap_explainer"] = shap.TreeExplainer(
+                _state["model"]
+            )
+            print("SHAP explainability enabled.")
+        except Exception as exc:
+            print(f"WARNING: SHAP initialization failed: {exc}")
+
+    _init_db()
+
+    print(
+        f"Startup complete. "
+        f"model_source={_state['model_source']}, "
+        "validation_data=lazy"
+    )
+
+    yield
+
+    print("Shutting down.")
+
+
+app = FastAPI(title="FraudLens API", version="0.1.0", lifespan=lifespan)
+
+# Allow the dashboard (opened as a local file:// page, or served from any local
+# dev port) to call this API from the browser. Wide open ("*") is appropriate
+# here since this is a local-only dev tool with no real user auth yet — this
+# would need to be locked down to specific origins before any real deployment.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class ScoreResponse(BaseModel):
+    transaction_id: int
+    risk_score: float
+    flagged: bool
+    threshold_used: float
+    top_reason_codes: list[dict]
+
+
+class InvestigateResponse(BaseModel):
+    transaction_id: int
+    risk_score: float
+    flagged: bool
+    threshold_used: float
+    top_reason_codes: list[dict]
+    case_file: str
+    case_id: int
+
+
+@app.get("/")
+def index():
+    dashboard_path = os.path.join(BASE_DIR, "frontend", "index.html")
+    if os.path.exists(dashboard_path):
+        return FileResponse(dashboard_path)
+    return {"status": "ok", "message": "FraudLens API is running"}
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "model_loaded": "model" in _state,
+        "model_type": _state.get("metadata", {}).get("model_type", "unknown"),
+        "model_source": _state.get("model_source", "unknown"),
+    }
+
+
+def _score_internal(transaction_id: int) -> ScoreResponse:
+    """Core scoring logic, shared by /score and /investigate so both always
+    agree on the risk score, threshold, and reason codes for a transaction —
+    avoids the two endpoints ever disagreeing or one having stale/missing data."""
+    feats = _state["metadata"]["feature_columns"]
+    threshold = _state["metadata"]["threshold_2pct_fp_budget"]
+
+    # ``val_data`` remains supported for callers/tests that inject an in-memory
+    # fixture. Production uses a filtered Arrow scan and materializes only one
+    # transaction's feature values.
+    if "val_data" in _state:
+        matches = _state["val_data"][_state["val_data"]["TransactionID"] == transaction_id]
+        if matches.empty:
+            raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
+        row = matches[feats]
+    else:
+        dataset = _state["val_dataset"]
+        columns = list(dict.fromkeys(["TransactionID"] + feats))
+        table = dataset.to_table(
+            columns=columns,
+            filter=ds.field("TransactionID") == transaction_id,
+        )
+        if table.num_rows == 0:
+            raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
+        # Preserve the trained estimator's DataFrame feature names and order.
+        import pandas as pd
+        row = table.select(feats).to_pandas()
+
+    if len(row) == 0:
+        raise HTTPException(status_code=404, detail=f"TransactionID {transaction_id} not found in dataset.")
+
+    X = row.fillna(-999)
+    risk_score = float(_state["model"].predict_proba(X)[:, 1][0])
+
+    top_reasons = []
+    if _state["shap_explainer"] is not None:
+        shap_values = _state["shap_explainer"].shap_values(X)
+        if isinstance(shap_values, list):
+            shap_values = shap_values[1]
+        contributions = shap_values[0]
+        top_idx = np.argsort(np.abs(contributions))[::-1][:5]
+        for i in top_idx:
+            top_reasons.append({
+                "feature": feats[i],
+                "value": float(X.iat[0, i]),
+                "shap_contribution": round(float(contributions[i]), 5),
+            })
+
+    return ScoreResponse(
+        transaction_id=transaction_id,
+        risk_score=round(risk_score, 5),
+        flagged=risk_score >= threshold,
+        threshold_used=round(threshold, 5),
+        top_reason_codes=top_reasons,
+    )
+
+
+@app.post("/score/{transaction_id}", response_model=ScoreResponse)
+def score_transaction(transaction_id: int):
+    return _score_internal(transaction_id)
+
+
+@app.post("/investigate/{transaction_id}", response_model=InvestigateResponse)
+def investigate_transaction(transaction_id: int):
+    # Reuse the exact same scoring logic first, so the case file — and the
+    # dashboard's flagged badge — always reflect the real threshold, never a
+    # stale or missing one from a separate earlier call.
+    score_result = _score_internal(transaction_id)
+
+    try:
+        agent_investigate = _load_agent_investigator()
+    except Exception as e:
+        # Importing agent can fail before Ollama is called (for example, when
+        # local-only training Parquet files are absent from a Render image).
+        # Surface this dependency/configuration problem as a useful 503 JSON.
+        raise HTTPException(
+            status_code=503,
+            detail=("Investigation agent could not initialize. Ensure src/agent.py, "
+                    "the transaction datasets, and the Ollama client are available. "
+                    f"Underlying error: {type(e).__name__}: {str(e)[:300]}"),
+        ) from e
+
+    try:
+        case_file_text = agent_investigate(transaction_id, verbose=False)
+    except Exception as e:
+        # Most commonly: the local Ollama service crashed or isn't running.
+        # Returning a proper HTTPException (rather than letting the raw
+        # exception propagate) ensures FastAPI still applies CORS headers
+        # to the error response — otherwise the browser reports a generic
+        # "Failed to fetch" instead of showing this actual message.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Agent investigation failed — the local Ollama service may have crashed or isn't running. "
+                   f"Try 'ollama run llama3.1:8b' in a terminal to check it responds, then retry. "
+                   f"Underlying error: {e}"
+        )
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO cases (transaction_id, risk_score, threshold_used, flagged, top_reason_codes, case_file, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            transaction_id,
+            score_result.risk_score,
+            score_result.threshold_used,
+            int(score_result.flagged),
+            json.dumps(score_result.top_reason_codes),
+            case_file_text,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    case_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    return InvestigateResponse(
+        transaction_id=transaction_id,
+        risk_score=score_result.risk_score,
+        flagged=score_result.flagged,
+        threshold_used=score_result.threshold_used,
+        top_reason_codes=score_result.top_reason_codes,
+        case_file=case_file_text,
+        case_id=case_id,
+    )
+
+
+def _load_agent_investigator():
+    """Import the investigation module on demand so scoring stays independent."""
+    from agent import investigate as agent_investigate
+    return agent_investigate
+
+
+@app.get("/cases")
+def list_cases(limit: int = 20):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT id, transaction_id, risk_score, created_at FROM cases ORDER BY id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.get("/cases/{case_id}")
+def get_case(case_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Case {case_id} not found.")
+    result = dict(row)
+    result["flagged"] = bool(result["flagged"])
+    result["top_reason_codes"] = json.loads(result["top_reason_codes"]) if result["top_reason_codes"] else []
+    return result
